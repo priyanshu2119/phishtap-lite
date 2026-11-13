@@ -1,0 +1,45 @@
+# App Lab build and venv cache. The library index alone is ~58 MB and is
+# regenerated on demand by tools/check_lib.sh, so none of this belongs in git.
+.cache/
+
+# App Lab writes these into the app directory on the board, never locally, but
+# ignore them in case a copy is pulled back for inspection.
+app.yaml.bak
+sketch.yaml.bak
+*.bak
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Runtime data. Holds the SQLite database, the HMAC server secret (mode 0600)
+# and the admin PIN hash. Never commit any of it.
+data/
+*.db
+*.db-wal
+*.db-shm
+server_secret.key
+
+# Node, if the frontend ever grows a build step
+node_modules/
+
+# Editors and OS
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+
+# Build artifacts
+build/
+dist/
+*.elf
+*.bin
+*.hex
+*.map
