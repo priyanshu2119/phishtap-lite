@@ -1,0 +1,25 @@
+# PhishTap Lite — hw_selftest sketch manifest
+#
+# Format verified against a working UNO Q app:
+#   github.com/mytechnotalent/iris-species-classification-app/blob/main/sketch/sketch.yaml
+# Libraries are plain "Name (version)" strings under the profile.
+#
+# NOTE on what is deliberately NOT listed here:
+#   Arduino_RouterBridge and Arduino_LED_Matrix are shipped inside the
+#   arduino:zephyr platform itself. The reference app above includes
+#   <Arduino_RouterBridge.h> and <Arduino_LED_Matrix.h> without declaring either
+#   in its libraries list, which is the evidence that they come with the core.
+#   If the build reports one of them as missing, add it here in the same
+#   "Name (version)" form - see the VERIFY LIST.
+#
+# App Lab normally manages this file itself. When importing through the App Lab
+# UI, add the MFRC522 library with the "Add sketch library" button instead of
+# editing this file, and let App Lab write it.
+
+profiles:
+  default:
+    platforms:
+      - platform: arduino:zephyr
+    libraries:
+      - MFRC522 (1.4.11)
+default_profile: default
