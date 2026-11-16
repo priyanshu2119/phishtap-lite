@@ -121,6 +121,28 @@ substitute for the reader. The external RC522 is mandatory.
 
 ## Power
 
+### JANALOG header order
+
+The physical order matters because the 3V3 pin is crowded by control and power
+pins. From the UNO Q datasheet:
+
+| Pin | Name | Warning |
+|---|---|---|
+| 1 | **BOOT** | MCU_BOOT0; a misplaced jumper can enter bootloader mode |
+| 2 | **IOREF** | 3.3 V output/reference, not the RC522 supply pin |
+| 3 | **RESET** | MCU_NRST; a misplaced jumper can reboot the board |
+| 4 | **+3V3** | The RC522 supply pin |
+| 5 | **+5V** | 5V_SYS; never connect this to RC522 VCC |
+| 6 | **GND** | |
+| 7 | **GND** | |
+| 8 | **VIN** | 7-24 V input, not an output |
+| 9+ | A0-A5 | Analog inputs, not 5 V tolerant |
+
+The +3V3 pin sits between RESET and +5V. Do not count positions from memory:
+read the silkscreen and verify the rail with the LED test in the selftest README.
+The same 3V3 rail is available on JMISC and JMEDIA, but those headers also carry
+1.8 V processor I/O and are not suitable for this wiring.
+
 From the official power specification:
 
 | Input | Voltage | Current |
@@ -310,6 +332,27 @@ Defining a function with any of those names in a sketch produces
 helper in this project is therefore prefixed `ptMatrix`. The global `reverse()` is
 also taken.
 
+### SPI2 pin verification
+
+The installed UNO Q core's `variant.h` defines the Arduino SPI aliases directly:
+
+```cpp
+#define MOSI D11 /* PB15 */
+#define MISO D12 /* PB14 */
+#define SCK  D13 /* PB13 */
+#define SS   D10 /* PB9 */
+```
+
+The board overlay configures `spi2` with deferred initialization and GPIO chip
+select control. This is why the project calls `SPI.begin()` and drives D10 as a
+plain GPIO around each raw transfer. Phase L proves these mappings on the actual
+board instead of relying on the header alone.
+
+The installed core also defines `INPUT_PULLDOWN = 0x3`, and its
+`wiring_digital.cpp` maps that mode to Zephyr's `GPIO_PULL_DOWN`. Phase W uses it
+only after this check was made; it does not assume the constant exists on every
+future core.
+
 ### RGB LEDs
 
 From the datasheet: LED3 is PH10/PH11/PH12 for R/G/B, LED4 is PH13/PH14/PH15.
@@ -406,6 +449,62 @@ Every transaction lives in `MFRC522.cpp`, which is its own translation unit and
 includes the header without the sketch's define. The library always runs at 4 MHz.
 To test a slower clock you have to drive SPI yourself, which is what the selftest's
 B0 raw probe does.
+
+### Register reset values used as a fingerprint
+
+From the NXP MFRC522 product data sheet, **Rev. 3.9, 27 April 2016**. The datasheet
+documents each register as `Table N. <Reg> register (address XXh); reset value:
+YYh`, so these are transcribed rather than remembered.
+
+| Register | Address | Reset value | Notes |
+|---|---|---|---|
+| CommandReg | 0x01 | **0x20** | bit 5 RcvOff = 1, bit 4 PowerDown = 0 |
+| ComIEnReg | 0x02 | 0x80 | |
+| ErrorReg | 0x06 | 0x00 | |
+| Status1Reg | 0x07 | 0x21 | low bits reflect CRC and timer state and can move |
+| Status2Reg | 0x08 | 0x00 | |
+| FIFOLevelReg | 0x0A | 0x00 | |
+| WaterLevelReg | 0x0B | 0x08 | |
+| ControlReg | 0x0C | 0x10 | |
+| BitFramingReg | 0x0D | 0x00 | |
+| ModeReg | 0x11 | **0x3F** | PCD_Init overwrites this to 0x3D |
+| TxModeReg | 0x12 | 0x00 | |
+| RxModeReg | 0x13 | 0x00 | |
+| TxControlReg | 0x14 | 0x80 | |
+| TxASKReg | 0x15 | 0x00 | PCD_Init overwrites this to 0x40 |
+| TxSelReg | 0x16 | 0x10 | |
+| RxSelReg | 0x17 | 0x84 | |
+| RxThresholdReg | 0x18 | 0x84 | |
+| DemodReg | 0x19 | **0x4D** | a distinctive bit pattern, good for diagnostics |
+| SerialSpeedReg | 0x1F | 0xEB | |
+| RFCfgReg | 0x26 | **0x48** | RxGain = 33 dB. PCD_Init overwrites to 0x70 |
+| GsNReg | 0x27 | 0x88 | |
+| CWGsPReg | 0x28 | 0x20 | |
+| ModGsPReg | 0x29 | 0x20 | |
+| TModeReg | 0x2A | 0x00 | PCD_Init overwrites to 0x80 |
+| TPrescalerReg | 0x2B | 0x00 | PCD_Init overwrites to 0xA9 |
+| TestSel1Reg | 0x31 | 0x00 | |
+| TestSel2Reg | 0x32 | 0x00 | |
+| TestPinEnReg | 0x33 | 0x80 | |
+| TestPinValueReg | 0x34 | 0x00 | |
+| AutoTestReg | 0x36 | 0x40 | |
+| VersionReg | 0x37 | no reset value listed | section 9.3.4.8: v1.0 = **0x91**, v2.0 = **0x92**. FM17522 clones read **0x88** |
+| AnalogTestReg | 0x38 | 0x00 | |
+
+`DivIrqReg`, `CollReg`, `TReloadRegH`, `TReloadRegL` and `TestBusReg` have no
+`reset value` entry in the datasheet tables, so they are not used as fingerprint
+registers.
+
+**Why this matters for diagnostics.** Ten registers with ten different documented
+defaults form a fingerprint. A broken bus returning all 0x00 is unambiguous, and
+getting all ten correct by chance on a noisy line is not realistic. A single
+VersionReg read cannot make that distinction, because one register can read 0x00
+for reasons unrelated to the chip being absent.
+
+The fingerprint must be read **before** `PCD_Init()`, because that function
+overwrites ModeReg, TxASKReg, TModeReg, TPrescalerReg, TReloadRegH/L and RFCfgReg.
+Reading the same registers *after* `PCD_Init()` is also useful, but for the
+opposite reason: it proves that writes reach the chip and not only reads.
 
 ### PCD_Init does not guarantee a hardware reset
 

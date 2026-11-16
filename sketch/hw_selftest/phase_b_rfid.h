@@ -54,12 +54,12 @@
  * Every single SPI transaction the library performs lives in MFRC522.cpp, which
  * is its own translation unit and includes MFRC522.h WITHOUT our define. The
  * macro therefore always expands to the 4 MHz default there. Defining it in the
- * sketch changes nothing at all — it only affects code in our own translation
+ * sketch changes nothing at all - it only affects code in our own translation
  * unit, and we issue no SPI transactions of our own through the library.
  *
- * The define is kept (harmlessly) so the intent is documented, but the real
- * slow-clock test is performed by rfidRawReadReg() below, which drives the bus
- * directly and can therefore use any clock it likes.
+ * The define is kept (harmlessly) so the intent is documented. The real
+ * slow-clock test is performed by ptSpiReadReg() in pt_spi_probe.h, which drives
+ * the bus directly and can therefore use any clock it likes.
  */
 #ifndef MFRC522_SPICLOCK
 #define MFRC522_SPICLOCK 1000000u
@@ -69,6 +69,7 @@
 
 #include "pt_pins.h"
 #include "pt_log.h"
+#include "pt_spi_probe.h"
 
 static MFRC522 s_rfid(PT_RC522_SS, PT_RC522_RST);
 
@@ -77,63 +78,130 @@ static MFRC522 s_rfid(PT_RC522_SS, PT_RC522_RST);
  * or whether they must fall back to "judge this by eye". */
 static bool s_rfidUsable = false;
 
-/* ── Raw SPI access, deliberately independent of the MFRC522 library ────────
- * When a reader does not respond there are two very different explanations:
- * the SPI bus is not working, or the bus works but the library/chip is in a bad
- * state. Going through the library cannot distinguish them, because a failure
- * looks identical either way. These two helpers talk to the chip directly so
- * the bus can be proven or ruled out on its own terms.
- */
-
 /*
- * Force a hardware reset of the RC522.
+ * Raw SPI access lives in pt_spi_probe.h, shared with Phase L and Phase W so the
+ * three phases cannot drift apart in how they drive the bus. The local names are
+ * kept as thin aliases because the rest of this file predates the extraction and
+ * the shorter names read better at the call sites.
  *
- * WHY THIS IS NOT OPTIONAL: MFRC522::PCD_Init() only performs a hard reset if it
- * first reads the RST pin as LOW:
- *
- *     pinMode(_resetPowerDownPin, INPUT);
- *     if (digitalRead(_resetPowerDownPin) == LOW) { ...hard reset...; }
- *     if (!hardReset) { PCD_Reset(); }        // soft reset, over SPI
- *
- * Many RC522 modules leave RST floating or fit a pull-up, so that read returns
- * HIGH, the hard reset is skipped, and the code falls back to PCD_Reset() — a
- * SOFT reset issued over SPI. If SPI is not yet talking, or the chip is in an
- * undefined state, the soft reset achieves nothing and every register then reads
- * back as 0x00. This is the single most common RC522 bring-up failure.
- *
- * Driving the pin LOW then HIGH ourselves guarantees a real hardware reset
- * regardless of what the pin happens to read, and costs 60 ms once at startup.
- * The 60 ms covers the datasheet's oscillator start-up time (crystal + 37.74 us)
- * with margin.
+ * WHY RAW ACCESS EXISTS AT ALL: when a reader does not respond there are two very
+ * different explanations, the bus is not working or the bus works and the chip is
+ * unhappy. Going through the library cannot distinguish them, because a failure
+ * looks identical either way.
  */
-inline void rfidHardReset(void) {
-  pinMode(PT_RC522_RST, OUTPUT);
-  digitalWrite(PT_RC522_RST, LOW);
-  delay(10);                       /* hold reset; datasheet minimum is ~100 ns */
-  digitalWrite(PT_RC522_RST, HIGH);
-  delay(60);                       /* oscillator start-up, with margin */
-}
-
-/*
- * Read one register over raw SPI at a chosen clock rate.
- *
- * `rawAddr` is the UNshifted datasheet register address (VersionReg is 0x37).
- * Per datasheet section 8.1.2.3 the SPI address byte is (addr << 1) & 0x7E with
- * the MSB set for a read, which for 0x37 yields 0xEE — byte-for-byte what the
- * library sends, so the two paths are directly comparable.
- */
+inline void    rfidHardReset(void) { ptRfidHardReset(); }
 inline uint8_t rfidRawReadReg(uint8_t rawAddr, uint32_t clockHz) {
-  uint8_t addrByte = (uint8_t)(0x80 | ((rawAddr << 1) & 0x7E));
-  SPI.beginTransaction(SPISettings(clockHz, MSBFIRST, SPI_MODE0));
-  digitalWrite(PT_RC522_SS, LOW);
-  SPI.transfer(addrByte);
-  uint8_t value = SPI.transfer(0x00);
-  digitalWrite(PT_RC522_SS, HIGH);
-  SPI.endTransaction();
-  return value;
+  return ptSpiReadReg(rawAddr, clockHz);
 }
 
-#define PT_RC522_REG_VERSION 0x37   /* datasheet VersionReg, unshifted */
+#define PT_RC522_REG_VERSION PT_REG_VERSION
+
+/*
+ * B0a: read the whole post-reset fingerprint and compare it against the values
+ * the NXP datasheet documents.
+ *
+ * WHY MORE THAN VersionReg: a single register can read 0x00 for reasons that
+ * have nothing to do with the chip being absent, and a single register reading
+ * correctly can happen by accident on a noisy line. Ten registers with ten
+ * different documented defaults form a fingerprint. Getting all ten right by
+ * chance on a broken bus is not a realistic possibility, so a full match is
+ * strong positive evidence and a full 0x00 row is strong negative evidence.
+ *
+ * These must be read BEFORE PCD_Init(), because PCD_Init overwrites several of
+ * them: ModeReg goes from its 0x3F reset value to 0x3D, and RFCfgReg from 0x48
+ * to 0x70 when PCD_SetAntennaGain(RxGain_max) runs. Reading afterwards would
+ * compare against the wrong expectations.
+ *
+ * Returns the number of registers whose masked bits matched.
+ */
+inline uint8_t rfidCheckFingerprint(uint32_t clockHz) {
+  uint8_t matched = 0;
+
+  logStep("      register        addr   expected   actual   match");
+  for (uint8_t i = 0; i < PT_FINGERPRINT_COUNT; ++i) {
+    const PtRegExpect* e = &PT_RESET_FINGERPRINT[i];
+    uint8_t actual = rfidRawReadReg(e->addr, clockHz);
+    bool ok = ((actual & e->mask) == (e->expected & e->mask));
+    if (ok) matched++;
+    ptLogf("      %-16s 0x%02X   0x%02X       0x%02X     %s",
+           e->name, e->addr, e->expected, actual, ok ? "yes" : "NO");
+  }
+  ptLogf("      %u of %u registers match their documented reset value",
+         (unsigned)matched, (unsigned)PT_FINGERPRINT_COUNT);
+  return matched;
+}
+
+/*
+ * B0b: read VersionReg many times and report how many reads agreed.
+ *
+ * WHY: this separates a STUCK line from a NOISY one, which the single reads
+ * above cannot do. A line held low returns the same byte twenty times out of
+ * twenty. A marginal connection returns a mix. The two have completely different
+ * fixes, so the count is printed rather than collapsed into pass or fail.
+ */
+inline void rfidRepeatRead(uint8_t rawAddr, uint32_t clockHz, uint8_t repeats) {
+  uint8_t first = rfidRawReadReg(rawAddr, clockHz);
+  uint8_t same = 1;
+  uint8_t distinct = 1;
+  uint8_t seen[8];
+  seen[0] = first;
+
+  for (uint8_t i = 1; i < repeats; ++i) {
+    uint8_t v = rfidRawReadReg(rawAddr, clockHz);
+    if (v == first) same++;
+    bool known = false;
+    for (uint8_t k = 0; k < distinct && k < 8; ++k) {
+      if (seen[k] == v) { known = true; break; }
+    }
+    if (!known && distinct < 8) seen[distinct++] = v;
+    delay(2);
+  }
+
+  ptLogf("      %u reads of 0x%02X: %u identical to the first (0x%02X), %u distinct value(s)",
+         (unsigned)repeats, rawAddr, (unsigned)same, first, (unsigned)distinct);
+  logStep("      values seen:");
+  for (uint8_t k = 0; k < distinct; ++k) ptLogf("        0x%02X", seen[k]);
+
+  if (same == repeats) {
+    logStep("      -> PERFECTLY STABLE. The line is not noisy. If the value is");
+    logStep("         wrong it is wrong consistently, which means stuck or");
+    logStep("         unpowered rather than a marginal connection.");
+  } else {
+    logStep("      -> VARIES BETWEEN READS. That is a contact or noise problem,");
+    logStep("         not a dead line. Re-seat jumpers and shorten them.");
+  }
+}
+
+/*
+ * B0c: compare manual chip select against the library's own handling.
+ *
+ * WHY: the devicetree overlay sets st,gpio-control on SPI2, meaning chip select
+ * is a plain GPIO rather than a peripheral function. If that assumption is wrong
+ * for this core build, the library's transaction handling and a manual
+ * digitalWrite would disagree, and only one of the two would actually select the
+ * chip. Running the same read both ways settles it without needing to read the
+ * overlay.
+ */
+inline void rfidCompareChipSelect(uint8_t rawAddr, uint32_t clockHz) {
+  /* Manual: drive SS ourselves around a raw transaction. */
+  uint8_t manual = rfidRawReadReg(rawAddr, clockHz);
+
+  /* Library: let MFRC522 drive its own _chipSelectPin inside PCD_ReadRegister. */
+  uint8_t viaLib = s_rfid.PCD_ReadRegister(
+      static_cast<MFRC522::PCD_Register>(rawAddr << 1));
+
+  ptLogf("      manual SS   -> 0x%02X", manual);
+  ptLogf("      library SS  -> 0x%02X", viaLib);
+  if (manual == viaLib) {
+    logStep("      -> Both paths agree, so chip select is being driven correctly");
+    logStep("         and st,gpio-control behaves as the overlay declares.");
+  } else {
+    logStep("      -> The two paths DISAGREE. Chip select handling is the fault.");
+    logStep("         Whichever value is a plausible register default is the");
+    logStep("         path that actually selected the chip.");
+  }
+}
+
 
 /* ── Confirmation protocol ──────────────────────────────────────────────────
  * The matrix, the LEDs and the buzzer have no readback, so several checks can
@@ -315,74 +383,116 @@ inline void phaseB_run(void) {
   digitalWrite(PT_RC522_SS, HIGH);
   SPI.begin();
 
-  /* ── B0: raw SPI probe, before the library is involved at all ──────────────
-   * Reading VersionReg directly over SPI answers the one question that matters
-   * most and that the library cannot answer: is the bus alive? It also sweeps
-   * the clock, because the library is hard-wired to 4 MHz and a marginal wiring
-   * job often works at 100 kHz while failing at 4 MHz.
+  /* ── B0: raw SPI probing, before the library is involved at all ────────────
+   * Four sub-tests, ordered so that each one narrows the fault:
+   *   B0a  the post-reset register fingerprint, expected versus actual
+   *   B0b  the same register read 20 times, to tell stuck from noisy
+   *   B0c  manual chip select versus the library's, to test st,gpio-control
+   *   B0d  the clock sweep, to test signal integrity
    *
-   * A hardware reset is forced first. See rfidHardReset() for why PCD_Init's own
-   * reset cannot be relied upon.
+   * All of this happens BEFORE PCD_Init(), deliberately. PCD_Init overwrites
+   * ModeReg (0x3F becomes 0x3D) and RFCfgReg (0x48 becomes 0x70 via
+   * PCD_SetAntennaGain), so reading the fingerprint afterwards would compare
+   * against the wrong expectations.
+   *
+   * A hardware reset is forced first. See ptRfidHardReset() for why PCD_Init's
+   * own reset cannot be relied upon.
    */
+  ptSpiBusBegin();
   rfidHardReset();
 
-  logStep("B0: raw SPI probe of VersionReg (0x37), bypassing the library");
-  static const uint32_t probeClocks[] = { 100000u, 1000000u, 4000000u };
-  const uint8_t probeCount =
-      (uint8_t)(sizeof(probeClocks) / sizeof(probeClocks[0]));
+  /* Everything in B0 uses the slowest clock. If the bus is marginal, 100 kHz
+   * gives it the best chance, and a failure at 100 kHz is far more meaningful
+   * than a failure at 4 MHz. */
+  const uint32_t slowClock = PT_PROBE_CLOCKS[0];
+
+  logStep("B0a: post-reset register fingerprint (raw SPI, library bypassed)");
+  ptLogf("      clock %lu Hz, read immediately after a hardware reset",
+         (unsigned long)slowClock);
+  logStep("      Expected values are from the NXP MFRC522 data sheet Rev. 3.9,");
+  logStep("      which documents each register's reset value explicitly.");
+  uint8_t matched = rfidCheckFingerprint(slowClock);
+  logStep("");
+
+  logStep("B0b: stability - VersionReg read 20 times");
+  rfidRepeatRead(PT_REG_VERSION, slowClock, 20);
+  logStep("");
+
+  logStep("B0c: chip select - manual GPIO versus the library's own handling");
+  rfidCompareChipSelect(PT_REG_VERSION, slowClock);
+  logStep("");
+
+  logStep("B0d: clock sweep on VersionReg");
   uint8_t  rawVersion   = 0x00;
   uint32_t rawBestClock = 0;
   uint8_t  rawAllSame   = 1;
   uint8_t  rawFirst     = 0xFF;
 
-  for (uint8_t i = 0; i < probeCount; ++i) {
-    uint8_t v = rfidRawReadReg(PT_RC522_REG_VERSION, probeClocks[i]);
+  for (uint8_t i = 0; i < PT_PROBE_CLOCK_COUNT; ++i) {
+    uint8_t v = rfidRawReadReg(PT_REG_VERSION, PT_PROBE_CLOCKS[i]);
     ptLogf("    @ %7lu Hz -> 0x%02X  (%s)",
-           (unsigned long)probeClocks[i], v, ptVersionName(v));
+           (unsigned long)PT_PROBE_CLOCKS[i], v, ptVersionName(v));
     if (i == 0) rawFirst = v;
     else if (v != rawFirst) rawAllSame = 0;
     /* Remember the slowest clock that produced a plausible version byte. */
     if (rawVersion == 0x00 && v != 0x00 && v != 0xFF) {
       rawVersion   = v;
-      rawBestClock = probeClocks[i];
+      rawBestClock = PT_PROBE_CLOCKS[i];
     }
   }
+  logStep("");
 
-  if (rawVersion != 0x00) {
-    ptLogf("    Raw SPI is ALIVE. Version 0x%02X, best at %lu Hz.",
+  /* ── B0 decision ─────────────────────────────────────────────────────────
+   * The fingerprint carries more weight than VersionReg alone. A chip that
+   * answers with ten correct documented defaults is unquestionably alive and
+   * correctly wired; a chip that returns 0x00 for all ten is unquestionably not
+   * talking, and no amount of retrying will change that.
+   */
+  logStep("B0 DECISION");
+  if (matched == PT_FINGERPRINT_COUNT) {
+    recordResult("B0-fingerprint", PT_PASS, "All registers match datasheet reset values");
+    logStep("    Every register matches its documented reset value. The module is");
+    logStep("    powered, selected, clocked and reading back correctly.");
+  } else if (matched == 0) {
+    recordResult("B0-fingerprint", PT_FAIL, "No register matched - bus or power dead");
+    if (rawAllSame && rawFirst == 0x00) {
+      logStep("    All ten registers read 0x00 and the line is stable, so MISO is");
+      logStep("    held low rather than noisy. Run Phase W to tell an unpowered");
+      logStep("    module from a short to ground, and Phase L to rule the board");
+      logStep("    itself in or out.");
+      logStep("");
+      logStep("    Most likely first: the module is not powered. Do the LED power");
+      logStep("    test in the README to prove which header pin is really 3V3.");
+      logStep("    JANALOG order is BOOT, IOREF, RESET, +3V3, +5V, GND, GND, VIN,");
+      logStep("    so one pin off lands on RESET, BOOT or +5V. The RC522 is a");
+      logStep("    2.5-3.3V part and +5V will destroy it.");
+    } else if (rawAllSame && rawFirst == 0xFF) {
+      logStep("    All reads are 0xFF, so MISO is held high or floating. Check");
+      logStep("    that MISO is actually in D12, and look for a jumper landing on");
+      logStep("    IOREF, which is a 3V3 output two pins from 3V3.");
+    } else {
+      logStep("    Reads vary but none matches. Suspect intermittent contact.");
+      logStep("    Re-seat every jumper, keep them under 20cm, and re-run.");
+    }
+  } else {
+    recordResult("B0-fingerprint", PT_FAIL, "Some registers matched, some did not");
+    ptLogf("    %u of %u matched. A partial match means the bus is working but",
+           (unsigned)matched, (unsigned)PT_FINGERPRINT_COUNT);
+    logStep("    some bits are corrupt, which points at signal integrity or a");
+    logStep("    marginal connection rather than a dead module. Compare the");
+    logStep("    expected and actual columns above: if the differences are all in");
+    logStep("    the same bit position, suspect one specific data line.");
+  }
+
+  if (rawVersion != 0x00 && rawVersion != 0xFF) {
+    ptLogf("    VersionReg resolved to 0x%02X, first working clock %lu Hz.",
            rawVersion, (unsigned long)rawBestClock);
     if (rawBestClock < 4000000u) {
       logStep("    NOTE: it only answered below 4 MHz. The library is fixed at");
-      logStep("    4 MHz, so reads may be unreliable - shorten the jumpers and");
-      logStep("    keep them away from the antenna coil.");
+      logStep("    4 MHz and cannot be slowed from a sketch, so reads may be");
+      logStep("    unreliable. Shorten the jumpers and route them away from the");
+      logStep("    antenna coil.");
     }
-    recordResult("B0-rawspi", PT_PASS, "Raw SPI answered");
-  } else if (rawAllSame && rawFirst == 0x00) {
-    recordResult("B0-rawspi", PT_FAIL, "MISO reads 0x00 at every clock");
-    logStep("    The bus is not getting a response. CHECK, in this order:");
-    logStep("      1. VCC on 3V3 (NOT 5V) and GND common with the board.");
-    logStep("         Measure 3.3V at the module's own pins, not at the board.");
-    logStep("      2. MISO is on D12 and MOSI on D11. Swapping these is the");
-    logStep("         single most common wiring error, and module silkscreen");
-    logStep("         order varies between sellers - read the label, not the");
-    logStep("         position.");
-    logStep("      3. SDA/SS on D10, SCK on D13, RST on D5.");
-    logStep("      4. Header solder joints on the module are actually made.");
-    logStep("         Un-soldered headers are extremely common on cheap RC522s.");
-    logStep("      5. Jumpers under 20cm and not bundled with the antenna coil.");
-  } else if (rawAllSame && rawFirst == 0xFF) {
-    recordResult("B0-rawspi", PT_FAIL, "MISO reads 0xFF at every clock");
-    logStep("    MISO is stuck high or floating. CHECK:");
-    logStep("      1. Is MISO actually connected to D12? A floating input");
-    logStep("         reads 0xFF.");
-    logStep("      2. Module VCC/GND present - an unpowered module cannot drive");
-    logStep("         MISO low.");
-    logStep("      3. MOSI/MISO not swapped.");
-  } else {
-    recordResult("B0-rawspi", PT_FAIL, "Inconsistent reads at every clock");
-    logStep("    Values differ between clock rates and none is a valid version.");
-    logStep("    Suspect intermittent wiring, a loose dupont connector, or noise.");
-    logStep("    Re-seat every jumper and keep them short.");
   }
 
   /* ── B1: the same read, this time through the library ─────────────────────
@@ -421,6 +531,46 @@ inline void phaseB_run(void) {
     return;
   }
   recordResult("B1-spi", PT_PASS, ptVersionName(version));
+
+  /* ── B1b: prove that WRITES reach the chip, not just reads ─────────────────
+   * PCD_Init() has just run, and it writes known values to registers whose reset
+   * defaults we already read in B0a. ModeReg goes from 0x3F to 0x3D, and
+   * RFCfgReg goes from 0x48 to 0x70 because PCD_Init calls
+   * PCD_SetAntennaGain(RxGain_max).
+   *
+   * A bus can read correctly and still fail to write, for example if MOSI is
+   * marginal while MISO is fine. Comparing the post-init values against both the
+   * reset default and the value PCD_Init should have written catches that, and it
+   * costs two register reads.
+   */
+  uint8_t modeAfter  = s_rfid.PCD_ReadRegister(MFRC522::ModeReg);
+  uint8_t rfcfgAfter = s_rfid.PCD_ReadRegister(MFRC522::RFCfgReg);
+  logStep("");
+  logStep("B1b: register values after PCD_Init(), to prove writes land");
+  logStep("      register        reset    expected after init    actual");
+  ptLogf("      ModeReg           0x3F     0x%02X                   0x%02X",
+         PT_REG_MODE_AFTER_INIT, modeAfter);
+  ptLogf("      RFCfgReg          0x48     0x%02X                   0x%02X",
+         PT_REG_RFCFG_AFTER_INIT, rfcfgAfter);
+
+  bool writesLand = (modeAfter == PT_REG_MODE_AFTER_INIT) &&
+                    (rfcfgAfter == PT_REG_RFCFG_AFTER_INIT);
+  if (writesLand) {
+    recordResult("B1b-writes", PT_PASS, "PCD_Init writes read back correctly");
+    logStep("      -> Both changed from their reset value to exactly what");
+    logStep("         PCD_Init writes. MOSI and the write path are good.");
+  } else if (modeAfter == 0x3F && rfcfgAfter == 0x48) {
+    recordResult("B1b-writes", PT_FAIL, "Registers still at reset values");
+    logStep("      -> Both are still at their RESET values, so reads work but");
+    logStep("         nothing was written. Suspect MOSI: it may be swapped with");
+    logStep("         MISO, or not making contact. Reads would still succeed");
+    logStep("         because MISO is fine.");
+  } else {
+    recordResult("B1b-writes", PT_FAIL, "Unexpected post-init register values");
+    logStep("      -> The values are neither the reset defaults nor what");
+    logStep("         PCD_Init writes. Something is corrupt on the bus. Check");
+    logStep("         jumper seating and routing, then re-run.");
+  }
 
   /* B2: the library's own self-test drives the chip's internal test bus and
    * compares against reference firmware images.

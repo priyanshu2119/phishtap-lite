@@ -18,11 +18,17 @@
 #   tools/deploy_to_board.sh                    deploy, phases unchanged
 #   tools/deploy_to_board.sh --phases=A         deploy with only Phase A enabled
 #   tools/deploy_to_board.sh --phases=A,B
+#   tools/deploy_to_board.sh --phases=L         SPI loopback, RC522 REMOVED
+#   tools/deploy_to_board.sh --phases=W         MISO line state, RC522 wired
 #   tools/deploy_to_board.sh --phases=all
 #   tools/deploy_to_board.sh --app myapp        target a different app folder
 #   tools/deploy_to_board.sh --check-lib        also pre-flight the pinned libraries
 #   tools/deploy_to_board.sh --loop             repeat the selftest forever
 #   tools/deploy_to_board.sh --dry-run          show what would happen
+#
+#   Phase letters: A board only, L SPI loopback (reader removed, D11-D12 jumper),
+#   W MISO line state (reader wired), B full RC522 test, C1/C2/C3 LEDs and buzzer.
+#   tools/run_phase.sh is a friendlier wrapper around the common combinations.
 #
 #   --loop is worth using when diagnosing: the selftest normally prints everything
 #   from setup() in the first seconds, so if App Lab's Serial monitor tab is not
@@ -91,7 +97,7 @@ cp "$SKETCH_DIR"/*.h "$STAGE"/ 2>/dev/null || true
 cp "$SKETCH_DIR/hw_selftest.ino" "$STAGE/hw_selftest.ino"
 
 if [ -n "$PHASES" ]; then
-  for p in A B C1 C2 C3; do
+  for p in A L W B C1 C2 C3; do
     want=0
     if [ "$PHASES" = "all" ]; then
       want=1

@@ -44,6 +44,12 @@
 #ifndef RUN_PHASE_A
 #define RUN_PHASE_A 1
 #endif
+#ifndef RUN_PHASE_L
+#define RUN_PHASE_L 0
+#endif
+#ifndef RUN_PHASE_W
+#define RUN_PHASE_W 0
+#endif
 #ifndef RUN_PHASE_B
 #define RUN_PHASE_B 1
 #endif
@@ -68,7 +74,7 @@
  * exactly one place that defines the include order. */
 #include "pt_runner.h"
 
-#define PT_SELFTEST_VERSION "1.1.0"
+#define PT_SELFTEST_VERSION "1.2.0"
 
 void setup() {
   /*
@@ -94,9 +100,11 @@ void setup() {
   Monitor.println("# PhishTap Lite - HARDWARE SELFTEST          #");
   Monitor.println("##############################################");
   ptLogf("version %s", PT_SELFTEST_VERSION);
-  ptLogf("phases enabled: A=%d B=%d C1=%d C2=%d C3=%d",
-         RUN_PHASE_A, RUN_PHASE_B, RUN_PHASE_C1, RUN_PHASE_C2, RUN_PHASE_C3);
-  logStep("Read this in App Lab's SERIAL MONITOR tab (not Python / App Launch).");
+  ptLogf("phases enabled: A=%d L=%d W=%d B=%d C1=%d C2=%d C3=%d",
+         RUN_PHASE_A, RUN_PHASE_L, RUN_PHASE_W, RUN_PHASE_B,
+         RUN_PHASE_C1, RUN_PHASE_C2, RUN_PHASE_C3);
+  logStep("Read this in App Lab's Serial monitor tab (called 'Sketch' in some");
+  logStep("App Lab versions). Not the Python or App Launch tab.");
   if (!consoleOk) {
     logStep("WARNING: Monitor.begin() reported the router link is not ready.");
     logStep("         Output may be lost. Check: systemctl status arduino-router");

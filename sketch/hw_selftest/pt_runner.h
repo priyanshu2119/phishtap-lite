@@ -31,8 +31,12 @@
 #include "pt_pins.h"
 #include "pt_log.h"
 #include "pt_matrix.h"
+#include "pt_prompt.h"
 #include "pt_buzzer.h"
+#include "pt_spi_probe.h"
 #include "phase_a_board.h"
+#include "phase_l_loopback.h"
+#include "phase_w_linestate.h"
 #include "phase_b_rfid.h"
 #include "phase_c_outputs.h"
 
@@ -72,6 +76,12 @@ inline void ptStartupCountdown(void) {
 /*
  * Run every enabled phase once, then print the summary.
  *
+ * The order is deliberate: least wiring first, and the diagnostics that isolate a
+ * fault before the test that depends on everything working. Phase L needs the
+ * reader REMOVED and a single MOSI-to-MISO jumper, Phase W needs it wired again,
+ * so running both in one pass means moving wires twice. Each phase announces what
+ * it needs on the console and the matrix and waits, per R16.
+ *
  * The RUN_PHASE_* macros are compile-time, so a disabled phase costs nothing but
  * a SKIP row in the summary. Keeping the sequence in one function lets loop()
  * repeat the whole run without duplicating the dispatch, which matters because
@@ -83,6 +93,18 @@ inline void ptRunAllPhases(void) {
   phaseA_run();
 #else
   recordResult("A", PT_SKIP, "Disabled at compile time");
+#endif
+
+#if RUN_PHASE_L
+  phaseL_run();
+#else
+  recordResult("L", PT_SKIP, "Disabled at compile time");
+#endif
+
+#if RUN_PHASE_W
+  phaseW_run();
+#else
+  recordResult("W", PT_SKIP, "Disabled at compile time");
 #endif
 
 #if RUN_PHASE_B

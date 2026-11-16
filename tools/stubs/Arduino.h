@@ -29,13 +29,28 @@ typedef uint8_t  byte;
 typedef bool     boolean;
 typedef uint16_t word;
 
-/* ── Pin levels and modes ─────────────────────────────────────────────────── */
-#define LOW          0x0
-#define HIGH         0x1
-#define INPUT        0x0
-#define OUTPUT       0x1
-#define INPUT_PULLUP 0x2
-#define INPUT_PULLDOWN 0x3
+/* ── Pin levels and modes ───────────────────────────────────────────────────
+ * Values match the real core's api/Common.h. Both the constants AND the enum
+ * types have to exist, because sketch code passes PinMode around as a parameter
+ * type rather than as a bare integer.
+ *
+ * INPUT_PULLDOWN was verified present on the board's core 1.1.0 before being
+ * relied upon: cores/arduino/api/Common.h defines it as 0x3, and
+ * wiring_digital.cpp maps it to GPIO_PULL_DOWN, so it configures a real internal
+ * pull-down rather than silently doing nothing.
+ */
+enum PinMode : uint8_t {
+  INPUT          = 0x0,
+  OUTPUT         = 0x1,
+  INPUT_PULLUP   = 0x2,
+  INPUT_PULLDOWN = 0x3,
+  INPUT_ANALOG   = 0x4
+};
+
+enum PinStatus : uint8_t {
+  LOW  = 0x0,
+  HIGH = 0x1
+};
 
 #define LSBFIRST 0
 #define MSBFIRST 1
@@ -99,10 +114,13 @@ typedef uint16_t word;
 #define F_CPU 160000000L   /* STM32U585 @ 160 MHz */
 #endif
 
-/* ── Core functions ───────────────────────────────────────────────────────── */
-inline void pinMode(uint8_t, uint8_t) {}
-inline void digitalWrite(uint8_t, uint8_t) {}
-inline int  digitalRead(uint8_t) { return 0; }
+/* ── Core functions ─────────────────────────────────────────────────────────
+ * Signatures use the real PinMode and PinStatus types rather than bare integers,
+ * so that passing a PinMode variable is type-checked the same way here as on the
+ * board. */
+inline void pinMode(uint8_t, PinMode) {}
+inline void digitalWrite(uint8_t, PinStatus) {}
+inline PinStatus digitalRead(uint8_t) { return LOW; }
 inline int  analogRead(uint8_t) { return 0; }
 inline void analogWrite(uint8_t, int) {}
 inline void analogWriteResolution(int) {}
