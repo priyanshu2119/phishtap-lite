@@ -4,16 +4,38 @@
 #   github.com/mytechnotalent/iris-species-classification-app/blob/main/sketch/sketch.yaml
 # Libraries are plain "Name (version)" strings under the profile.
 #
-# NOTE on what is deliberately NOT listed here:
-#   Arduino_RouterBridge and Arduino_LED_Matrix are shipped inside the
-#   arduino:zephyr platform itself. The reference app above includes
-#   <Arduino_RouterBridge.h> and <Arduino_LED_Matrix.h> without declaring either
-#   in its libraries list, which is the evidence that they come with the core.
-#   If the build reports one of them as missing, add it here in the same
-#   "Name (version)" form - see the VERIFY LIST.
+# ── WHY MFRC522 IS PINNED TO 1.4.12 AND NOT 1.4.11 ─────────────────────────
+# 1.4.11 does not compile on this board. src/MFRC522Extended.cpp lines 824 and
+# 847 contain
+#       if (backData && (backLen > 0)) {
+# where backLen is a `byte *`. An ordered comparison between a pointer and an
+# integer is an ERROR in C++, not a warning, so the build dies with:
+#       error: ordered comparison of pointer with integer zero
+#              ('byte*' {aka 'unsigned char*'} and 'int')
+# Upstream fixed it in 1.4.12 by dereferencing: `(*backLen > 0)`.
 #
-# App Lab normally manages this file itself. When importing through the App Lab
-# UI, add the MFRC522 library with the "Add sketch library" button instead of
+# We never call MFRC522Extended ourselves, only the base MFRC522 class, but
+# arduino-cli compiles every .cpp in a library's src/, so the broken file is
+# built regardless and takes the whole sketch down with it.
+#
+# Verified by downloading both zips from the exact URL App Lab uses and diffing
+# the lines. tools/check_lib.sh reproduces that check.
+#
+# ── The "incompatible architecture" WARNING is expected and harmless ─────────
+#   WARNING: library MFRC522 claims to run on avr, megaavr, STM32F1, teensy,
+#   esp8266, esp32, samd, atmelsam architecture(s) and may be incompatible with
+#   your current board which runs on zephyr architecture(s).
+# 1.4.12's library.properties still omits `zephyr`, so this warning persists.
+# The library is plain C++ over SPI and builds fine once the bug above is gone.
+#
+# ── Libraries deliberately NOT listed here ─────────────────────────────────
+#   Arduino_RouterBridge and Arduino_LED_Matrix ship inside the arduino:zephyr
+#   platform. App Lab also pulls Arduino_RPClite, MsgPack, DebugLog,
+#   ArxTypeTraits and ArxContainer automatically, as the build log confirms.
+#   Listing them here would only risk a version conflict.
+#
+# App Lab normally manages this file. When importing through the App Lab UI,
+# add the MFRC522 library with the "Add sketch library" button instead of
 # editing this file, and let App Lab write it.
 
 profiles:
@@ -21,5 +43,5 @@ profiles:
     platforms:
       - platform: arduino:zephyr
     libraries:
-      - MFRC522 (1.4.11)
+      - MFRC522 (1.4.12)
 default_profile: default
