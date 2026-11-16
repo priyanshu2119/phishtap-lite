@@ -144,12 +144,24 @@ while IFS= read -r -d '' ino; do
     continue
   fi
 
-  cmd=(g++ -std="$CXX_STD" -fsyntax-only -Wall
+  # -Wextra is included because it is what surfaces "set but not used" warnings,
+  # and those are the only visible symptom of a conditionally-compiled-out path
+  # (for example an #ifdef that silently evaluated false). A pass that hides
+  # warnings would have let that bug through. -Wno-unused-parameter keeps the
+  # noise down, since stub-backed code legitimately ignores many arguments.
+  cmd=(g++ -std="$CXX_STD" -fsyntax-only -Wall -Wextra -Wno-unused-parameter
        -I "$STUB_DIR" -I "$sketch_dir" "$cpp")
   [ "$VERBOSE" -eq 1 ] && printf '   %s\n' "${cmd[*]}"
 
   if output="$("${cmd[@]}" 2>&1)"; then
-    echo "   OK"
+    # Exit 0 means no errors, but there may still be warnings. Show them rather
+    # than swallowing them, because a warning here is often a real logic bug.
+    if [ -n "$output" ]; then
+      echo "   OK (with warnings)"
+      printf '%s\n' "$output" | sed -e "s|$cpp|$rel|g" -e "s|$STUB_DIR/||g" | sed -n '1,40p'
+    else
+      echo "   OK"
+    fi
   else
     failed=$((failed + 1))
     echo "   FAIL"
