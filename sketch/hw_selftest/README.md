@@ -653,7 +653,7 @@ No hard failures.
 | Phase L: no echo at any clock, with the D11→D12 jumper fitted | SPI not driving these pins | Confirm the jumper is really in D11 and D12, then investigate pinctrl, `zephyr,deferred-init`, and whether the `SPI` object bound to SPI2 |
 | Phase L: repeats disagree with each other | Intermittent contact on the loopback jumper | Re-seat it and re-run before concluding anything |
 | Phase W: MISO low even with pull-up, in both SS states | Module **unpowered**, or MISO shorted to GND | Do Step 0. JANALOG order is BOOT, IOREF, RESET, +3V3, +5V, GND, GND, VIN |
-| Phase W: MISO follows the pull in **both** SS states | Nothing is ever driving MISO | The MISO wire is not making contact, MOSI/MISO are swapped, or the module header is unsoldered |
+| Phase W: MISO follows the pull in **both** SS states | **Inconclusive, and normal.** Line is healthy but the MFRC522 only drives MISO after an address byte is clocked | Run **Phase B** — it clocks a real transaction. Only if B also reads `0x00` suspect unsoldered headers, swapped MOSI/MISO, or missing SCK |
 | Board reboots when you touch a header pin with a jumper | That pin is **RESET** | JANALOG pin 3. Move one pin over to reach +3V3 |
 | Board stops responding, matrix dark, after wiring | Jumper landed on **BOOT** | JANALOG pin 1. Remove it and power cycle |
 | RC522 gets hot, or died after wiring | **5 V was applied to VCC** | JANALOG pin 5 is +5V, one pin from +3V3. The module is a 2.5–3.3 V part and is now likely destroyed |

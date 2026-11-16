@@ -348,6 +348,24 @@ select control. This is why the project calls `SPI.begin()` and drives D10 as a
 plain GPIO around each raw transfer. Phase L proves these mappings on the actual
 board instead of relying on the header alone.
 
+`ZephyrSPI::begin()` was read directly from the installed core
+(`libraries/SPI/SPI.cpp`). It is not a one-time initializer; it unconditionally
+re-applies the pinctrl every call:
+
+```cpp
+void arduino::ZephyrSPI::begin() {
+    /* Re-apply DEFAULT pinctrl state so shared pins
+     * are remuxed back to SPI after other peripherals have used them. */
+    (void)zephyr::arduino::init_dev_apply_pinctrl(spi_dev);
+}
+```
+
+This matters for Phase W, which reconfigures D12 as a plain GPIO input to probe
+the MISO line state. Calling `SPI.begin()` afterwards remuxes D11/D12/D13 back to
+SPI, so a later Phase B works without a reboot. There is no already-initialized
+guard, so re-calling it is always safe. Phase L passing on real hardware is the
+empirical confirmation that this remux works.
+
 The installed core also defines `INPUT_PULLDOWN = 0x3`, and its
 `wiring_digital.cpp` maps that mode to Zephyr's `GPIO_PULL_DOWN`. Phase W uses it
 only after this check was made; it does not assume the constant exists on every

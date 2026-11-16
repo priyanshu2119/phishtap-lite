@@ -158,7 +158,7 @@ WHAT IT TESTS
   took, so a future core that drops it degrades instead of failing to build.
 
 DECISION TABLE
-  SS HIGH follows the pull, SS LOW drives low
+  SS HIGH follows the pull, SS LOW stops following it (driven)
       -> BEST CASE. The module is powered, connected and responding to chip
          select. Wiring and power are fine, so the problem is at the protocol
          layer. Re-run Phase B and study B0c and B1b.
@@ -168,9 +168,13 @@ DECISION TABLE
          low through its input ESD diode, which looks exactly like a short to
          ground from out here. Do the LED power test. Also check for a short to
          GND, or a module damaged by 5V on VCC.
-  follows the pull in BOTH SS states
-      -> nothing is ever driving MISO. The MISO wire is not making contact, or
-         MOSI and MISO are swapped, or the module header is not soldered.
+  follows the pull in BOTH SS states (drive not confirmed)
+      -> INCONCLUSIVE, and that is normal. The line is healthy (not stuck low,
+         not stuck high), but this static probe cannot confirm the module drives
+         MISO, because the MFRC522 only drives MISO after an address byte is
+         clocked in. RUN PHASE B - it clocks a real transaction. Only if Phase B
+         also reads 0x00 should you suspect unsoldered headers, swapped
+         MOSI/MISO, or a missing SCK.
   reads 1 even with pull-down
       -> MISO held high. Look for a solder bridge or a jumper landing on IOREF,
          which is a 3V3 OUTPUT two pins away from 3V3 on JANALOG.
