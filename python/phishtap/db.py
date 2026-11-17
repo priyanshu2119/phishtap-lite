@@ -91,8 +91,14 @@ CREATE TABLE IF NOT EXISTS players (
 CREATE TABLE IF NOT EXISTS sessions (
     token           TEXT PRIMARY KEY,
     pin             TEXT NOT NULL,
-    player_id       TEXT NOT NULL,
-    uid_hex         TEXT NOT NULL,
+    -- Nullable: a session is created at tap time, before the player has supplied
+    -- a nickname and therefore before player_id can be computed in shared-card
+    -- mode. It is backfilled when consent is submitted.
+    player_id       TEXT,
+    -- A keyed HMAC of the card UID, NOT the UID itself. Storing the raw UID here
+    -- would violate docs/ARCHITECTURE.md §8 and turn the database into a card
+    -- tracker sitting right next to the pseudonym it was meant to protect.
+    card_ref        TEXT NOT NULL,
     state           TEXT NOT NULL,
     round_index     INTEGER NOT NULL DEFAULT 0,
     lives           INTEGER NOT NULL DEFAULT 3,
@@ -111,11 +117,11 @@ CREATE TABLE IF NOT EXISTS sessions (
 CREATE TABLE IF NOT EXISTS answers (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     session_token   TEXT NOT NULL,
-    player_id       TEXT NOT NULL,
+    player_id       TEXT,
     round_index     INTEGER NOT NULL,
     item_id         TEXT NOT NULL,
     label_correct   INTEGER NOT NULL,   -- 0 safe, 1 phish
-    label_answered  INTEGER NOT NULL,   -- 0 safe, 1 phish
+    label_answered  INTEGER NOT NULL,   -- 0 safe, 1 phish, -1 timed out
     correct         INTEGER NOT NULL,   -- 0 wrong, 1 right
     timed_out       INTEGER NOT NULL DEFAULT 0,
     limit_ms        INTEGER NOT NULL,
@@ -142,7 +148,8 @@ CREATE TABLE IF NOT EXISTS items (
 
 CREATE TABLE IF NOT EXISTS tap_log (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    uid_hex     TEXT NOT NULL,
+    -- card_ref, not the raw UID. See the note on sessions above.
+    card_ref    TEXT NOT NULL,
     player_id   TEXT,
     session_token TEXT,
     t_mono      INTEGER NOT NULL,
@@ -150,9 +157,10 @@ CREATE TABLE IF NOT EXISTS tap_log (
 );
 
 CREATE INDEX IF NOT EXISTS idx_sessions_player ON sessions(player_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_card ON sessions(card_ref);
 CREATE INDEX IF NOT EXISTS idx_answers_session ON answers(session_token);
 CREATE INDEX IF NOT EXISTS idx_answers_player ON answers(player_id);
-CREATE INDEX IF NOT EXISTS idx_tap_log_uid ON tap_log(uid_hex);
+CREATE INDEX IF NOT EXISTS idx_tap_log_card ON tap_log(card_ref);
 """
 
 

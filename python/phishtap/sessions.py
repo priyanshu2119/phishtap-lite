@@ -26,7 +26,7 @@ from enum import Enum
 from .clock import monotonic_ms, wall_now_iso
 from .config import SESSION_TTL_S, STARTING_LIVES
 from .db import db, transaction
-from .privacy import player_id as compute_player_id
+from .privacy import card_ref, player_id as compute_player_id
 
 
 class SessionState(str, Enum):
@@ -289,25 +289,29 @@ class SessionStore:
     # ── Persistence ───────────────────────────────────────────────────────
 
     def _persist_new(self, s: Session) -> None:
-        conn = db()
+        # The raw UID is held in memory for the lifetime of the session because
+        # computing player_id needs it, but it is NEVER written to the database.
+        # card_ref is a keyed HMAC of it, so sessions can still be grouped by
+        # physical card without the DB becoming a card tracker.
+        ref = card_ref(s.uid_hex)
         with transaction() as tx:
             tx.execute(
                 """INSERT INTO sessions
-                   (token, pin, player_id, uid_hex, state, round_index, lives,
+                   (token, pin, player_id, card_ref, state, round_index, lives,
                     score, streak, created_mono, created_wall, clock_offset_ms,
                     expires_at_mono)
                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
-                    s.token, s.pin, s.player_id, s.uid_hex, s.state.value,
+                    s.token, s.pin, s.player_id, ref, s.state.value,
                     s.round_index, s.lives, s.score, s.streak,
                     s.created_mono, s.created_wall, s.clock_offset_ms,
                     s.expires_at_mono,
                 ),
             )
             tx.execute(
-                """INSERT INTO tap_log (uid_hex, player_id, session_token, t_mono, t_wall)
+                """INSERT INTO tap_log (card_ref, player_id, session_token, t_mono, t_wall)
                    VALUES (?,?,?,?,?)""",
-                (s.uid_hex, s.player_id, s.token, s.created_mono, s.created_wall),
+                (ref, s.player_id, s.token, s.created_mono, s.created_wall),
             )
 
     def _persist_state(self, s: Session) -> None:

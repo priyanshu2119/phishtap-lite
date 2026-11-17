@@ -97,23 +97,34 @@ _HOST_RE = re.compile(
 def defang(text: str) -> str:
     """Neutralise every URL in ``text``.
 
-    ``https://`` -> ``hxxps://`` and every dot inside a hostname -> ``[.]``.
-    Applied to sender, subject, body and explanation, because a URL can appear
-    in any of them.
+    ``https://`` -> ``hxxps://`` and every dot inside a hostname -> ``[.]``,
+    exactly as docs/ARCHITECTURE.md §7 specifies. Applied to sender, subject,
+    body and explanation, because a URL can appear in any of them.
 
-    Idempotent: running it twice does not double-defang, because ``hxxps://``
-    no longer matches the scheme pattern and ``[.]`` no longer matches the
-    hostname pattern.
+    The scheme is rewritten by an explicit mapping rather than by blanket
+    character substitution. Substituting every 'p' with 'x' turns "https" into
+    "httxs", which is defanged but does not match the documented form and reads
+    like a typo. The mapping keeps the recognisable shape so a student can still
+    see what the original scheme was, which is the point of showing them a
+    defanged URL in a training tool.
+
+    Idempotent: running it twice does not double-defang, because ``hxxps://`` no
+    longer matches the scheme pattern and ``[.]`` no longer matches the hostname
+    pattern.
     """
     if not text:
         return text
 
+    # Lowercased scheme -> defanged form. Case is restored from the original
+    # match so "HTTPS://" stays visually uppercase.
+    _SCHEME_MAP = {"http": "hxxp", "https": "hxxps", "ftp": "fxp"}
+
     def _scheme_sub(m: re.Match[str]) -> str:
-        # Replace the 'p' in "http"/"ftp" with 'x', preserving case, so
-        # "https://" -> "hxxps://" and "HTTP://" -> "HTTPX://" stays recognisable
-        # while no longer being a scheme a browser or a link-detector will act on.
-        s = m.group(1)
-        return s.replace("p", "x").replace("P", "X") + "://"
+        original = m.group(1)
+        out = _SCHEME_MAP.get(original.lower(), original)
+        if original.isupper():
+            out = out.upper()
+        return out + "://"
 
     def _host_sub(m: re.Match[str]) -> str:
         return m.group(1).replace(".", "[.]")

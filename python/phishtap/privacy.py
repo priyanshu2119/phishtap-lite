@@ -123,6 +123,35 @@ def player_id(uid_hex: str, nickname: str | None = None) -> str:
     return mac.hexdigest()[:16]
 
 
+def card_ref(uid_hex: str) -> str:
+    """A keyed pseudonym for the CARD alone, independent of any nickname.
+
+    WHY THIS EXISTS
+    The engine needs to group sessions by physical card: to find whether someone
+    has already given consent on this card, and to answer an admin's
+    "delete everything from this card". The obvious way is to store the UID, and
+    an earlier version of the schema did exactly that in ``sessions.uid_hex`` and
+    ``tap_log.uid_hex``.
+
+    That violated docs/ARCHITECTURE.md §8, which states the raw UID exists only
+    in the bridge event payload, the HMAC input, and then nowhere. Persisting it
+    in two tables would have meant the database itself was a card tracker,
+    readable by anyone who got the file, and the pseudonymisation of player_id
+    would have been pointless because the raw identifier sat right next to it.
+
+    So the card gets its own keyed hash. It is stable for a given card and
+    secret, it groups correctly, and it cannot be reversed to the UID without the
+    server secret. It is deliberately a DIFFERENT value from player_id, because
+    in shared-card mode one card maps to many players and conflating the two
+    would collapse them.
+    """
+    mac = hmac.new(
+        server_secret(), b"card_ref\x00" + uid_hex.encode("ascii", errors="ignore"),
+        hashlib.sha256,
+    )
+    return mac.hexdigest()[:16]
+
+
 # ── Nickname validation ───────────────────────────────────────────────────
 
 # A small, conservative profanity filter. Not exhaustive, and not meant to be:
@@ -186,7 +215,6 @@ class UidRedactionFilter(logging.Filter):
             if hasattr(record, key):
                 setattr(record, key, "[REDACTED]")
         return True
-
 
 def install_uid_redaction() -> None:
     """Attach the redaction filter to the root logger."""
