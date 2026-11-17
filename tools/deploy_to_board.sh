@@ -405,6 +405,27 @@ for extra in corpus.json requirements.txt; do
   fi
 done
 
+# Static web assets. The WebUI brick serves assets_dir_path (default /app/assets)
+# and requires an index.html if that directory exists, so a partially pushed
+# assets folder is worse than none at all: the brick raises RuntimeError at
+# startup instead of simply serving no UI. Push the whole directory, and clear it
+# first for the same reason the package is cleared - adb push merges, so a page
+# deleted from the repository would otherwise keep being served.
+if [ -d "$REPO_ROOT/assets" ]; then
+  echo "    scaffold: pushing web assets"
+  if [ "$DRY_RUN" -eq 0 ]; then
+    "$ADB" shell "rm -rf '$APP_ROOT/assets'"
+    "$ADB" shell "mkdir -p '$APP_ROOT/assets'"
+    run "$ADB" push "$REPO_ROOT/assets/." "$APP_ROOT/assets/"
+    if ! "$ADB" shell "[ -f '$APP_ROOT/assets/index.html' ]" >/dev/null 2>&1; then
+      echo "deploy_to_board: WARNING - assets/ was pushed but has no index.html." >&2
+      echo "  The WebUI brick raises RuntimeError at startup in that case." >&2
+    fi
+  else
+    echo "    DRY RUN: would push assets/"
+  fi
+fi
+
 run "$ADB" push "$STAGE/$INO_NAME" "$REMOTE_DIR/sketch.ino"
 
 for h in "$STAGE"/*.h; do
