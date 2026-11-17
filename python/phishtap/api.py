@@ -440,6 +440,16 @@ class ApiService:
         logger.warning("admin reset the database: all players, sessions and answers deleted")
         return _ok({"reset": True})
 
+    def admin_analytics(self, admin_token: str | None) -> ApiResult:
+        """The full analytics report: cohort accuracy, per-cue breakdown,
+        reaction-time distribution and the tap-to-completion funnel."""
+        denied = self._require_admin(admin_token)
+        if denied is not None:
+            return denied
+        from .analytics import full_report
+
+        return _ok(full_report())
+
     def admin_clock(self, admin_token: str | None, offset_ms: int) -> ApiResult:
         denied = self._require_admin(admin_token)
         if denied is not None:

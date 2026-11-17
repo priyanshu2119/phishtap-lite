@@ -189,6 +189,11 @@ def _register_rest(ui: Any, api: ApiService) -> None:
     ) -> JSONResponse:
         return as_json(api.admin_clock(x_admin_token, offset_ms))
 
+    def admin_analytics(
+        x_admin_token: str | None = Header(default=None, alias="X-Admin-Token"),
+    ) -> JSONResponse:
+        return as_json(api.admin_analytics(x_admin_token))
+
     routes: list[tuple[str, str, Callable[..., Any]]] = [
         ("GET",  "/api/health",              health),
         ("GET",  "/api/kiosk",               kiosk),
@@ -206,6 +211,7 @@ def _register_rest(ui: Any, api: ApiService) -> None:
         ("POST", "/api/admin/player/delete", admin_delete_player),
         ("POST", "/api/admin/db/reset",      admin_db_reset),
         ("POST", "/api/admin/clock",         admin_clock),
+        ("GET",  "/api/admin/analytics",     admin_analytics),
     ]
     for method, path, handler in routes:
         ui.expose_api(method, path, handler)

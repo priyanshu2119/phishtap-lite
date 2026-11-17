@@ -123,6 +123,19 @@ def main() -> None:
         raise SystemExit(1) from e
     logger.info("  database : schema ready")
 
+    # Mirror the corpus into the items table. The analytics join answers to items
+    # to break accuracy down by cue, and cues only exist on the corpus, so without
+    # this the cue report would come back empty no matter how much was played.
+    from phishtap.db import sync_items_to_db
+    try:
+        written = sync_items_to_db(items)
+        logger.info("  items    : %d corpus items synced to the database", written)
+    except Exception as e:  # noqa: BLE001
+        # Not fatal: the game plays fine without it, only the cue analytics
+        # degrade. Failing to start over a reporting table would be the wrong
+        # trade at a demo.
+        logger.error("could not sync corpus items to the database: %s", e)
+
     # ── Clock offset ──────────────────────────────────────────────────────
     # Restored from meta so an admin's correction survives a restart. The board
     # has no RTC, so without this every reboot resets the wall clock to whatever

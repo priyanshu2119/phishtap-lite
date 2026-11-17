@@ -212,3 +212,43 @@ def now_mono() -> int:
 def now_wall() -> str:
     """Convenience: wall-clock ISO string, for INSERT statements."""
     return wall_now_iso()
+
+
+def sync_items_to_db(items) -> int:
+    """Mirror the in-memory corpus into the ``items`` table.
+
+    WHY THE CORPUS IS DUPLICATED INTO THE DATABASE
+    The answers table stores ``item_id`` and the item's correct label, which is
+    enough to score a session. But the analytics in ``analytics.py`` break
+    accuracy down by CUE, and cues live on the corpus item. Joining to the items
+    table is what makes that possible without denormalising the cue list onto
+    every answer row.
+
+    Called at startup with an UPSERT, so editing corpus.json and restarting
+    updates the metadata without orphaning historical answers. Deleting and
+    reinserting instead would break the foreign key relationship for every
+    answer already recorded against that item.
+
+    Returns the number of items written.
+    """
+    import json as _json
+
+    conn = db()
+    count = 0
+    with transaction() as tx:
+        for item in items:
+            tx.execute(
+                """INSERT INTO items (id, channel, label, difficulty, cues)
+                   VALUES (?,?,?,?,?)
+                   ON CONFLICT(id) DO UPDATE SET
+                     channel=excluded.channel,
+                     label=excluded.label,
+                     difficulty=excluded.difficulty,
+                     cues=excluded.cues""",
+                (
+                    item.id, item.channel, item.label, item.difficulty,
+                    _json.dumps(list(item.cues)),
+                ),
+            )
+            count += 1
+    return count
