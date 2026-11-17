@@ -96,10 +96,20 @@ inline void logFloat(const char* label, float value, unsigned char decimals,
  * have no readback path, so the firmware genuinely cannot tell whether they
  * lit up. Reporting PASS for those would be a lie; reporting FAIL would be
  * wrong too. VISUAL means "a human must confirm this".
+ *
+ * PT_WARN is an ADVISORY: something is not textbook, but it does not stop the
+ * project. This distinction matters. A counterfeit RC522 reports a version byte
+ * the library has no reference table for, so PCD_PerformSelfTest() aborts and
+ * returns false, and several analog receiver registers hold different defaults
+ * than the NXP datasheet lists. None of that prevents reading a UID, which is
+ * all this project does. Scoring those as hard failures produced a summary that
+ * said "do not start Stage 1b" about a reader that had just read a card five
+ * times out of five. Only PT_FAIL blocks.
  */
 typedef enum {
   PT_PASS = 0,
   PT_FAIL,
+  PT_WARN,
   PT_VISUAL,
   PT_SKIP
 } PtVerdict;
@@ -108,17 +118,19 @@ inline const char* verdictName(PtVerdict v) {
   switch (v) {
     case PT_PASS:   return "PASS";
     case PT_FAIL:   return "FAIL";
+    case PT_WARN:   return "WARN";
     case PT_VISUAL: return "VISUAL";
     case PT_SKIP:   return "SKIP";
   }
   return "?";
 }
 
-/* Sized for every row the full run can produce: A1-A3, B0-B5, C1-C3 is twelve,
- * plus headroom so a future phase cannot silently drop results. Exceeding the
- * cap does not crash - recordResult() stops storing - but the summary would be
- * incomplete, which is worse than using a few more bytes. */
-#define PT_MAX_RESULTS 16
+/* Sized for every row the full run can produce: A1-A3, L, W, B0-B5 plus the
+ * Phase B bottom line, and C1-C3 is sixteen, plus headroom so a future phase
+ * cannot silently drop results. Exceeding the cap does not crash - recordResult()
+ * stops storing - but the summary would be incomplete, which is worse than using
+ * a few more bytes. */
+#define PT_MAX_RESULTS 20
 
 typedef struct {
   const char* phase;
@@ -167,34 +179,42 @@ inline void logStep(const char* text) {
 /*
  * Final report.
  *
- * Only PT_FAIL counts as a hard failure. PT_VISUAL rows are deliberately not
- * failures: they mark the boundary of what firmware can verify on its own, and
- * the operator is asked to confirm them by eye or by ear.
+ * Only PT_FAIL blocks. PT_WARN rows are advisories worth reading but not worth
+ * stopping for, and PT_VISUAL rows mark the boundary of what firmware can verify
+ * on its own. Conflating the three is how a working reader gets reported as a
+ * failed bring-up.
  */
 inline void printSummary(void) {
   logBlank();
   Monitor.println("================= SUMMARY ==================");
   for (unsigned char i = 0; i < s_resultCount; ++i) {
     char line[PT_LOG_BUF];
-    snprintf(line, sizeof(line), "  %-7s %-7s %s",
+    snprintf(line, sizeof(line), "  %-13s %-7s %s",
              s_results[i].phase, verdictName(s_results[i].verdict),
              s_results[i].detail);
     Monitor.println(line);
   }
   Monitor.println("=============================================");
 
-  unsigned char fails = 0;
-  unsigned char visuals = 0;
+  unsigned char fails = 0, warns = 0, visuals = 0;
   for (unsigned char i = 0; i < s_resultCount; ++i) {
-    if (s_results[i].verdict == PT_FAIL)   ++fails;
-    if (s_results[i].verdict == PT_VISUAL) ++visuals;
+    switch (s_results[i].verdict) {
+      case PT_FAIL:   ++fails;   break;
+      case PT_WARN:   ++warns;   break;
+      case PT_VISUAL: ++visuals; break;
+      default: break;
+    }
   }
 
   if (fails > 0) {
-    ptLogf("%u hard FAILURE(S). Do not start Stage 1b until they are resolved.",
+    ptLogf("%u BLOCKING failure(s). Resolve these before Stage 1b.",
            (unsigned)fails);
   } else {
-    Monitor.println("No hard failures.");
+    Monitor.println("No blocking failures.");
+  }
+  if (warns > 0) {
+    ptLogf("%u advisory warning(s) - read them, but they do not block progress.",
+           (unsigned)warns);
   }
   if (visuals > 0) {
     ptLogf("%u row(s) marked VISUAL need your eyes or ears - see the log above.",

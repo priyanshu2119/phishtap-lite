@@ -63,29 +63,96 @@
  * `mask` lets a register be compared loosely where a bit is documented as
  * changing on its own. Status1Reg's low bits reflect the CRC and timer state and
  * can move, so only the documented reset bits are asserted there.
+ *
+ * `digital` separates two very different kinds of register, and this distinction
+ * is what makes the fingerprint usable on real hardware rather than only on a
+ * genuine NXP part:
+ *
+ *   digital = true   Control, interrupt, status and mode registers. These are
+ *                    pure logic, so every MFRC522-compatible die implements them
+ *                    identically. A mismatch here means the bus or the chip is
+ *                    genuinely wrong.
+ *
+ *   digital = false  Receiver analog front-end configuration. Counterfeit dies
+ *                    have a different analog design, so their power-on defaults
+ *                    legitimately differ from the NXP table. A mismatch here is
+ *                    evidence of a clone, NOT evidence of a fault.
+ *
+ * Measured on a real module reporting version 0x82: all seven digital registers
+ * matched exactly, while RxThresholdReg, DemodReg and RFCfgReg - all three
+ * analog - did not. That pattern is a clone signature, and the reader went on to
+ * read a card UID five times out of five.
  */
 typedef struct {
   const char* name;
   uint8_t     addr;
   uint8_t     expected;
   uint8_t     mask;      /* bits that must match; 0xFF means all of them */
+  bool        digital;   /* true = must match on any compatible die */
 } PtRegExpect;
 
 static const PtRegExpect PT_RESET_FINGERPRINT[] = {
-  { "CommandReg",   PT_REG_COMMAND,     0x20, 0xFF },  /* RcvOff=1, PowerDown=0 */
-  { "ComIEnReg",    PT_REG_COMIEN,      0x80, 0xFF },
-  { "Status1Reg",   PT_REG_STATUS1,     0x21, 0x21 },  /* low bits can move */
-  { "ModeReg",      PT_REG_MODE,        0x3F, 0xFF },
-  { "TxControlReg", PT_REG_TXCONTROL,   0x80, 0x83 },  /* bit 7 plus Tx1/Tx2RFEn */
-  { "RxThresholdReg", PT_REG_RXTHRESHOLD, 0x84, 0xFF },
-  { "DemodReg",     PT_REG_DEMOD,       0x4D, 0xFF },  /* distinctive bit pattern */
-  { "RFCfgReg",     PT_REG_RFCFG,       0x48, 0xFF },  /* RxGain = 33 dB */
-  { "GsNReg",       PT_REG_GSN,         0x88, 0xFF },
-  { "AutoTestReg",  PT_REG_AUTOTEST,    0x40, 0xFF },
+  { "CommandReg",     PT_REG_COMMAND,     0x20, 0xFF, true  }, /* RcvOff=1, PowerDown=0 */
+  { "ComIEnReg",      PT_REG_COMIEN,      0x80, 0xFF, true  },
+  { "Status1Reg",     PT_REG_STATUS1,     0x21, 0x21, true  }, /* low bits can move */
+  { "ModeReg",        PT_REG_MODE,        0x3F, 0xFF, true  },
+  { "TxControlReg",   PT_REG_TXCONTROL,   0x80, 0x83, true  }, /* bit 7 plus Tx1/Tx2RFEn */
+  { "GsNReg",         PT_REG_GSN,         0x88, 0xFF, false },
+  { "AutoTestReg",    PT_REG_AUTOTEST,    0x40, 0xFF, true  },
+  { "RxThresholdReg", PT_REG_RXTHRESHOLD, 0x84, 0xFF, false }, /* analog: clone-variable */
+  { "DemodReg",       PT_REG_DEMOD,       0x4D, 0xFF, false }, /* analog: clone-variable */
+  { "RFCfgReg",       PT_REG_RFCFG,       0x48, 0xFF, false }, /* analog: clone-variable */
 };
 
 #define PT_FINGERPRINT_COUNT \
   (sizeof(PT_RESET_FINGERPRINT) / sizeof(PT_RESET_FINGERPRINT[0]))
+
+/*
+ * Classify a VersionReg byte.
+ *
+ * The NXP datasheet section 9.3.4.8 documents only 91h (v1.0) and 92h (v2.0);
+ * the library additionally knows 90h (v0.0) and 88h (Fudan FM17522). Everything
+ * else is a counterfeit die. The values listed here were collected from
+ * miguelbalboa/rfid issue #428 ("[Collection] Bad boards") and the Arduino
+ * forum, where users report 0x12, 0x18, 0x82, 0x8C, 0xB0, 0xB2 and 0xB3 on
+ * modules that nevertheless read cards.
+ *
+ * WHY THIS MATTERS: PCD_PerformSelfTest() switches on the version and returns
+ * false from its `default:` case for anything it does not recognise. It aborts
+ * BEFORE comparing a single byte, so on a clone the self-test result says
+ * nothing at all about the chip's health. Treating that false as a hardware
+ * failure sends someone debugging a reader that works.
+ */
+typedef enum {
+  PT_VER_GENUINE = 0,   /* 0x90 / 0x91 / 0x92 - NXP, self-test meaningful */
+  PT_VER_KNOWN_CLONE,   /* 0x88 - FM17522, library HAS a reference table   */
+  PT_VER_UNKNOWN_CLONE, /* anything else - no reference table exists       */
+  PT_VER_DEAD           /* 0x00 or 0xFF - nothing answering on the bus     */
+} PtVersionClass;
+
+inline PtVersionClass ptVersionClass(uint8_t v) {
+  if (v == 0x00 || v == 0xFF) return PT_VER_DEAD;
+  if (v == 0x90 || v == 0x91 || v == 0x92) return PT_VER_GENUINE;
+  if (v == 0x88) return PT_VER_KNOWN_CLONE;
+  return PT_VER_UNKNOWN_CLONE;
+}
+
+inline const char* ptVersionDescribe(uint8_t v) {
+  switch (ptVersionClass(v)) {
+    case PT_VER_GENUINE:
+      return (v == 0x90) ? "genuine MFRC522 v0.0"
+                         : ((v == 0x91) ? "genuine MFRC522 v1.0"
+                                        : "genuine MFRC522 v2.0");
+    case PT_VER_KNOWN_CLONE:
+      return "FM17522 clone (Fudan) - library has a reference table";
+    case PT_VER_UNKNOWN_CLONE:
+      return "COUNTERFEIT/clone die - version not in the NXP datasheet";
+    case PT_VER_DEAD:
+      return (v == 0x00) ? "NO RESPONSE - MISO stuck low"
+                         : "NO RESPONSE - MISO stuck high or floating";
+  }
+  return "?";
+}
 
 /* The three clocks every probe sweeps. 100 kHz is slow enough to survive almost
  * any jumper quality, 4 MHz is what the library is hardwired to, and 1 MHz sits

@@ -89,6 +89,29 @@ inline void ptStartupCountdown(void) {
  * once before.
  */
 inline void ptRunAllPhases(void) {
+  /* Phase L and Phase B have CONTRADICTORY wiring requirements: L needs the RC522
+   * completely removed with a D11-D12 loopback jumper fitted, while B needs the
+   * reader wired with that jumper absent. Enabling both in one run guarantees one
+   * of them is executed with the wrong wiring, and the resulting failure looks
+   * like a hardware fault rather than a test-setup mistake.
+   *
+   * This happened for real: a combined run reported L-loopback FAIL because the
+   * reader was still attached and driving MISO, which buried the fact that B
+   * went on to read a card perfectly. Warn up front rather than let the operator
+   * decode a misleading summary. */
+#if RUN_PHASE_L && (RUN_PHASE_B || RUN_PHASE_W)
+  logBlank();
+  logStep("!!! WARNING: Phase L is enabled together with Phase W/B. !!!");
+  logStep("    L needs the RC522 REMOVED and a D11-D12 jumper fitted.");
+  logStep("    W and B need the RC522 WIRED and that jumper removed.");
+  logStep("    One of them WILL run with the wrong wiring and report a failure");
+  logStep("    that is not a hardware fault. Run them separately:");
+  logStep("      tools/run_phase.sh L      then      tools/run_phase.sh diag");
+  logBlank();
+  ptMatrixScrollText("L AND B CONFLICT", 60);
+  delay(2000);
+#endif
+
 #if RUN_PHASE_A
   phaseA_run();
 #else

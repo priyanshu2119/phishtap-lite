@@ -276,11 +276,20 @@ inline void phaseL_run(void) {
       logStep("    A stuck-HIGH result additionally suggests a pull-up is winning,");
       logStep("    which points at the pin never being driven at all.");
     } else {
-      recordResult("L-loopback", PT_FAIL, "No clean echo at any clock, values vary");
-      logStep("    Received bytes vary but never match what was sent, at any");
-      logStep("    clock. That is not a stuck line and not a working bus.");
-      logStep("    Suspect the jumper making intermittent contact, or MOSI not");
-      logStep("    toggling. Re-seat the jumper and re-run before going further.");
+      recordResult("L-loopback", PT_FAIL, "Stable but WRONG bytes - second driver on MISO?");
+      logStep("    The received bytes are STABLE across repeats but do not match");
+      logStep("    what was sent. A loose jumper gives random values; a consistent");
+      logStep("    wrong value means something else is driving MISO.");
+      logStep("");
+      logStep("    SUSPECT FIRST: the RC522 is still connected. This phase needs it");
+      logStep("    COMPLETELY removed, all seven wires, leaving only the D11-D12");
+      logStep("    jumper. Counterfeit RC522 modules are documented as driving MISO");
+      logStep("    even when their chip select is not asserted (miguelbalboa/rfid");
+      logStep("    issue #428), so a connected module corrupts the loopback even");
+      logStep("    though it is deselected.");
+      logStep("");
+      logStep("    If the RC522 really is fully disconnected, then suspect the");
+      logStep("    D11-D12 jumper itself, or that MOSI is not toggling.");
     }
   } else {
     ptMatrixShowText2("ER");

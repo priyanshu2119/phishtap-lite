@@ -104,31 +104,48 @@ inline uint8_t rfidRawReadReg(uint8_t rawAddr, uint32_t clockHz) {
  * have nothing to do with the chip being absent, and a single register reading
  * correctly can happen by accident on a noisy line. Ten registers with ten
  * different documented defaults form a fingerprint. Getting all ten right by
- * chance on a broken bus is not a realistic possibility, so a full match is
- * strong positive evidence and a full 0x00 row is strong negative evidence.
+ * chance on a broken bus is not a realistic possibility.
+ *
+ * WHY SPLIT DIGITAL FROM ANALOG: counterfeit dies implement the digital logic
+ * identically but have a different analog receiver front end, so their power-on
+ * defaults for RxThresholdReg, DemodReg and RFCfgReg legitimately differ from
+ * the NXP table. Counting those as failures would condemn a reader that goes on
+ * to read cards perfectly. Only the digital registers are treated as proof of a
+ * working bus and a compatible chip.
  *
  * These must be read BEFORE PCD_Init(), because PCD_Init overwrites several of
  * them: ModeReg goes from its 0x3F reset value to 0x3D, and RFCfgReg from 0x48
  * to 0x70 when PCD_SetAntennaGain(RxGain_max) runs. Reading afterwards would
  * compare against the wrong expectations.
  *
- * Returns the number of registers whose masked bits matched.
+ * Returns the number of DIGITAL registers that matched, and writes the analog
+ * match count to *analogMatched.
  */
-inline uint8_t rfidCheckFingerprint(uint32_t clockHz) {
-  uint8_t matched = 0;
+inline uint8_t rfidCheckFingerprint(uint32_t clockHz, uint8_t* analogMatched,
+                                    uint8_t* analogTotal, uint8_t* digitalTotal) {
+  uint8_t digMatched = 0, digTotal = 0;
+  uint8_t anaMatched = 0, anaTotal = 0;
 
-  logStep("      register        addr   expected   actual   match");
+  logStep("      register        addr   expected   actual   class    match");
   for (uint8_t i = 0; i < PT_FINGERPRINT_COUNT; ++i) {
     const PtRegExpect* e = &PT_RESET_FINGERPRINT[i];
     uint8_t actual = rfidRawReadReg(e->addr, clockHz);
     bool ok = ((actual & e->mask) == (e->expected & e->mask));
-    if (ok) matched++;
-    ptLogf("      %-16s 0x%02X   0x%02X       0x%02X     %s",
-           e->name, e->addr, e->expected, actual, ok ? "yes" : "NO");
+    if (e->digital) { digTotal++; if (ok) digMatched++; }
+    else            { anaTotal++; if (ok) anaMatched++; }
+    ptLogf("      %-16s 0x%02X   0x%02X       0x%02X     %-7s  %s",
+           e->name, e->addr, e->expected, actual,
+           e->digital ? "digital" : "analog", ok ? "yes" : "NO");
   }
-  ptLogf("      %u of %u registers match their documented reset value",
-         (unsigned)matched, (unsigned)PT_FINGERPRINT_COUNT);
-  return matched;
+  ptLogf("      digital registers: %u/%u match (these prove the bus and chip)",
+         (unsigned)digMatched, (unsigned)digTotal);
+  ptLogf("      analog registers:  %u/%u match (clone dies differ here by design)",
+         (unsigned)anaMatched, (unsigned)anaTotal);
+
+  *analogMatched = anaMatched;
+  *analogTotal   = anaTotal;
+  *digitalTotal  = digTotal;
+  return digMatched;
 }
 
 /*
@@ -348,15 +365,10 @@ inline const char* ptPiccTypeName(MFRC522::PICC_Type t) {
  * and SS are correct.
  */
 inline const char* ptVersionName(uint8_t v) {
-  switch (v) {
-    case 0x88: return "FM17522 clone (Fudan) - works, but self-test may differ";
-    case 0x90: return "MFRC522 v0.0";
-    case 0x91: return "MFRC522 v1.0";
-    case 0x92: return "MFRC522 v2.0";
-    case 0x00: return "READ 0x00 - MISO stuck low, no SPI response";
-    case 0xFF: return "READ 0xFF - MISO stuck high or floating";
-  }
-  return "unrecognised version byte";
+  /* Delegates to the shared classifier in pt_spi_probe.h so there is one place
+   * that knows which version bytes are genuine, which are known clones and which
+   * are unrecognised counterfeits. */
+  return ptVersionDescribe(v);
 }
 
 inline void rfidFormatUid(char* out, size_t outLen) {
@@ -411,7 +423,9 @@ inline void phaseB_run(void) {
          (unsigned long)slowClock);
   logStep("      Expected values are from the NXP MFRC522 data sheet Rev. 3.9,");
   logStep("      which documents each register's reset value explicitly.");
-  uint8_t matched = rfidCheckFingerprint(slowClock);
+  uint8_t analogMatched = 0, analogTotal = 0, digitalTotal = 0;
+  uint8_t digMatched = rfidCheckFingerprint(slowClock, &analogMatched,
+                                            &analogTotal, &digitalTotal);
   logStep("");
 
   logStep("B0b: stability - VersionReg read 20 times");
@@ -423,40 +437,70 @@ inline void phaseB_run(void) {
   logStep("");
 
   logStep("B0d: clock sweep on VersionReg");
-  uint8_t  rawVersion   = 0x00;
-  uint32_t rawBestClock = 0;
-  uint8_t  rawAllSame   = 1;
-  uint8_t  rawFirst     = 0xFF;
+  uint8_t  rawVersion    = 0x00;
+  uint8_t  rawAllSame    = 1;
+  uint8_t  rawFirst      = 0xFF;
+  uint8_t  clocksWorked  = 0;   /* how many of the three produced a live byte */
+  bool     fastestFailed = false;
 
   for (uint8_t i = 0; i < PT_PROBE_CLOCK_COUNT; ++i) {
     uint8_t v = rfidRawReadReg(PT_REG_VERSION, PT_PROBE_CLOCKS[i]);
+    bool live = (v != 0x00 && v != 0xFF);
     ptLogf("    @ %7lu Hz -> 0x%02X  (%s)",
-           (unsigned long)PT_PROBE_CLOCKS[i], v, ptVersionName(v));
+           (unsigned long)PT_PROBE_CLOCKS[i], v, ptVersionDescribe(v));
     if (i == 0) rawFirst = v;
     else if (v != rawFirst) rawAllSame = 0;
-    /* Remember the slowest clock that produced a plausible version byte. */
-    if (rawVersion == 0x00 && v != 0x00 && v != 0xFF) {
-      rawVersion   = v;
-      rawBestClock = PT_PROBE_CLOCKS[i];
+    if (live) {
+      clocksWorked++;
+      if (rawVersion == 0x00) rawVersion = v;
+    } else if (i == PT_PROBE_CLOCK_COUNT - 1) {
+      /* The library is hardwired to 4 MHz, so a failure only at the fastest
+       * clock is the one case that genuinely threatens real operation. */
+      fastestFailed = true;
     }
   }
   logStep("");
 
   /* ── B0 decision ─────────────────────────────────────────────────────────
-   * The fingerprint carries more weight than VersionReg alone. A chip that
-   * answers with ten correct documented defaults is unquestionably alive and
-   * correctly wired; a chip that returns 0x00 for all ten is unquestionably not
-   * talking, and no amount of retrying will change that.
+   * Scored on the DIGITAL registers only. Those are pure logic, so every
+   * MFRC522-compatible die implements them identically and a mismatch means
+   * something is really wrong. The analog receiver registers are allowed to
+   * differ, because counterfeit dies have a different analog front end and
+   * different power-on defaults there by design.
    */
   logStep("B0 DECISION");
-  if (matched == PT_FINGERPRINT_COUNT) {
-    recordResult("B0-fingerprint", PT_PASS, "All registers match datasheet reset values");
-    logStep("    Every register matches its documented reset value. The module is");
-    logStep("    powered, selected, clocked and reading back correctly.");
-  } else if (matched == 0) {
+  PtVersionClass vclass = ptVersionClass(rawVersion);
+
+  if (digMatched == digitalTotal && digitalTotal > 0) {
+    if (analogMatched == analogTotal) {
+      recordResult("B0-fingerprint", PT_PASS,
+                   "All registers match datasheet reset values");
+      logStep("    Every register, digital and analog, matches its documented");
+      logStep("    reset value. The module is powered, selected, clocked and");
+      logStep("    reading back correctly.");
+    } else {
+      recordResult("B0-fingerprint", PT_WARN,
+                   "Digital regs match; analog differ - counterfeit die");
+      ptLogf("    All %u DIGITAL registers match exactly, but %u of %u analog",
+             (unsigned)digitalTotal, (unsigned)(analogTotal - analogMatched),
+             (unsigned)analogTotal);
+      logStep("    receiver registers do not. That combination is the signature");
+      logStep("    of a COUNTERFEIT die, not a wiring fault: the digital logic is");
+      logStep("    identical to a genuine part, while the analog front end differs");
+      logStep("    and so powers up with different defaults.");
+      logStep("");
+      logStep("    This is NOT a failure. Such modules read card UIDs normally,");
+      logStep("    which is all this project does. Known trade-offs of clones:");
+      logStep("      - shorter read range (often 2-3cm instead of 5cm)");
+      logStep("      - some cannot read certain tag types, blue keyfobs in");
+      logStep("        particular, so use the white MIFARE card for the demo");
+      logStep("      - write operations are unreliable - irrelevant here, since");
+      logStep("        this project is read-only by policy");
+    }
+  } else if (digMatched == 0) {
     recordResult("B0-fingerprint", PT_FAIL, "No register matched - bus or power dead");
     if (rawAllSame && rawFirst == 0x00) {
-      logStep("    All ten registers read 0x00 and the line is stable, so MISO is");
+      logStep("    All registers read 0x00 and the line is stable, so MISO is");
       logStep("    held low rather than noisy. Run Phase W to tell an unpowered");
       logStep("    module from a short to ground, and Phase L to rule the board");
       logStep("    itself in or out.");
@@ -471,28 +515,39 @@ inline void phaseB_run(void) {
       logStep("    that MISO is actually in D12, and look for a jumper landing on");
       logStep("    IOREF, which is a 3V3 output two pins from 3V3.");
     } else {
-      logStep("    Reads vary but none matches. Suspect intermittent contact.");
-      logStep("    Re-seat every jumper, keep them under 20cm, and re-run.");
+      logStep("    Reads vary but no digital register matches. Suspect intermittent");
+      logStep("    contact. Re-seat every jumper, keep them under 20cm, re-run.");
     }
   } else {
-    recordResult("B0-fingerprint", PT_FAIL, "Some registers matched, some did not");
-    ptLogf("    %u of %u matched. A partial match means the bus is working but",
-           (unsigned)matched, (unsigned)PT_FINGERPRINT_COUNT);
-    logStep("    some bits are corrupt, which points at signal integrity or a");
-    logStep("    marginal connection rather than a dead module. Compare the");
-    logStep("    expected and actual columns above: if the differences are all in");
-    logStep("    the same bit position, suspect one specific data line.");
+    recordResult("B0-fingerprint", PT_FAIL,
+                 "Some DIGITAL registers failed - bus is corrupting data");
+    ptLogf("    %u of %u digital registers matched. Unlike an analog-only",
+           (unsigned)digMatched, (unsigned)digitalTotal);
+    logStep("    mismatch, this means bits are being corrupted in transit, which");
+    logStep("    points at signal integrity or a marginal connection rather than");
+    logStep("    a clone. Compare the expected and actual columns above: if the");
+    logStep("    differences are all in the same bit position, suspect one");
+    logStep("    specific data line.");
   }
 
-  if (rawVersion != 0x00 && rawVersion != 0xFF) {
-    ptLogf("    VersionReg resolved to 0x%02X, first working clock %lu Hz.",
-           rawVersion, (unsigned long)rawBestClock);
-    if (rawBestClock < 4000000u) {
-      logStep("    NOTE: it only answered below 4 MHz. The library is fixed at");
-      logStep("    4 MHz and cannot be slowed from a sketch, so reads may be");
-      logStep("    unreliable. Shorten the jumpers and route them away from the");
-      logStep("    antenna coil.");
-    }
+  if (vclass == PT_VER_UNKNOWN_CLONE || vclass == PT_VER_KNOWN_CLONE) {
+    ptLogf("    VersionReg = 0x%02X -> %s", rawVersion, ptVersionDescribe(rawVersion));
+    logStep("    Documented NXP versions are 0x90/0x91/0x92. Values such as 0x12,");
+    logStep("    0x18, 0x82, 0x88, 0x8C, 0xB0, 0xB2 and 0xB3 are counterfeit dies");
+    logStep("    reported widely in miguelbalboa/rfid issue #428, and those modules");
+    logStep("    commonly read cards fine despite the unknown version.");
+  } else if (rawVersion != 0x00 && rawVersion != 0xFF) {
+    ptLogf("    VersionReg = 0x%02X -> %s", rawVersion, ptVersionDescribe(rawVersion));
+  }
+
+  if (fastestFailed && clocksWorked > 0) {
+    logStep("    NOTE: it answered at the slower clocks but NOT at 4 MHz. The");
+    logStep("    library is fixed at 4 MHz and cannot be slowed from a sketch, so");
+    logStep("    reads will be unreliable. Shorten the jumpers and route them away");
+    logStep("    from the antenna coil, then re-run.");
+  } else if (clocksWorked == PT_PROBE_CLOCK_COUNT) {
+    logStep("    Answered identically at all three clocks, so this is not a");
+    logStep("    signal-integrity problem.");
   }
 
   /* ── B1: the same read, this time through the library ─────────────────────
@@ -532,63 +587,97 @@ inline void phaseB_run(void) {
   }
   recordResult("B1-spi", PT_PASS, ptVersionName(version));
 
-  /* ── B1b: prove that WRITES reach the chip, not just reads ─────────────────
+  /* ── B1b: prove that WRITES reach the chip, not just reads ───────────────
    * PCD_Init() has just run, and it writes known values to registers whose reset
-   * defaults we already read in B0a. ModeReg goes from 0x3F to 0x3D, and
-   * RFCfgReg goes from 0x48 to 0x70 because PCD_Init calls
-   * PCD_SetAntennaGain(RxGain_max).
+   * defaults we already read in B0a.
    *
-   * A bus can read correctly and still fail to write, for example if MOSI is
-   * marginal while MISO is fine. Comparing the post-init values against both the
-   * reset default and the value PCD_Init should have written catches that, and it
-   * costs two register reads.
+   * ModeReg is the authoritative test. It is a pure digital register, it goes
+   * from 0x3F to 0x3D, and every compatible die behaves identically. If it
+   * changed, writes land.
+   *
+   * RFCfgReg is reported but NOT used to decide the verdict. It is an analog
+   * receiver register, and PCD_Init sets it to RxGain_max (0x70) via
+   * PCD_SetAntennaGain. Counterfeit dies implement the gain field differently,
+   * so a clone can leave it at something else entirely while still having
+   * accepted the write. An earlier revision required both registers to match and
+   * therefore reported "something is corrupt on the bus" for a reader that had
+   * just proved writes worked and went on to read a card five times out of five.
    */
   uint8_t modeAfter  = s_rfid.PCD_ReadRegister(MFRC522::ModeReg);
   uint8_t rfcfgAfter = s_rfid.PCD_ReadRegister(MFRC522::RFCfgReg);
   logStep("");
   logStep("B1b: register values after PCD_Init(), to prove writes land");
-  logStep("      register        reset    expected after init    actual");
-  ptLogf("      ModeReg           0x3F     0x%02X                   0x%02X",
-         PT_REG_MODE_AFTER_INIT, modeAfter);
-  ptLogf("      RFCfgReg          0x48     0x%02X                   0x%02X",
-         PT_REG_RFCFG_AFTER_INIT, rfcfgAfter);
+  logStep("      register        reset    expected after init    actual   verdict");
+  bool modeOk = (modeAfter == PT_REG_MODE_AFTER_INIT);
+  ptLogf("      ModeReg           0x3F     0x%02X                   0x%02X     %s",
+         PT_REG_MODE_AFTER_INIT, modeAfter, modeOk ? "MATCH" : "differs");
+  ptLogf("      RFCfgReg          0x48     0x%02X                   0x%02X     %s",
+         PT_REG_RFCFG_AFTER_INIT, rfcfgAfter,
+         (rfcfgAfter == PT_REG_RFCFG_AFTER_INIT) ? "MATCH" : "differs (analog)");
 
-  bool writesLand = (modeAfter == PT_REG_MODE_AFTER_INIT) &&
-                    (rfcfgAfter == PT_REG_RFCFG_AFTER_INIT);
-  if (writesLand) {
-    recordResult("B1b-writes", PT_PASS, "PCD_Init writes read back correctly");
-    logStep("      -> Both changed from their reset value to exactly what");
-    logStep("         PCD_Init writes. MOSI and the write path are good.");
-  } else if (modeAfter == 0x3F && rfcfgAfter == 0x48) {
-    recordResult("B1b-writes", PT_FAIL, "Registers still at reset values");
-    logStep("      -> Both are still at their RESET values, so reads work but");
+  if (modeOk) {
+    recordResult("B1b-writes", PT_PASS, "ModeReg changed as PCD_Init writes");
+    logStep("      -> ModeReg moved from its 0x3F reset value to exactly 0x3D,");
+    logStep("         which only happens if the write reached the chip. MOSI and");
+    logStep("         the write path are good.");
+    if (rfcfgAfter != PT_REG_RFCFG_AFTER_INIT) {
+      logStep("      -> RFCfgReg differs, which is expected on a counterfeit die:");
+      logStep("         it is an analog gain register and clones implement the");
+      logStep("         gain field differently. Not a fault.");
+    }
+  } else if (modeAfter == 0x3F) {
+    recordResult("B1b-writes", PT_FAIL, "ModeReg still at reset value");
+    logStep("      -> ModeReg is still at its RESET value, so reads work but");
     logStep("         nothing was written. Suspect MOSI: it may be swapped with");
     logStep("         MISO, or not making contact. Reads would still succeed");
     logStep("         because MISO is fine.");
   } else {
-    recordResult("B1b-writes", PT_FAIL, "Unexpected post-init register values");
-    logStep("      -> The values are neither the reset defaults nor what");
-    logStep("         PCD_Init writes. Something is corrupt on the bus. Check");
-    logStep("         jumper seating and routing, then re-run.");
+    recordResult("B1b-writes", PT_FAIL, "ModeReg holds an unexpected value");
+    ptLogf("      -> ModeReg is 0x%02X, which is neither its 0x3F reset value nor",
+           modeAfter);
+    logStep("         the 0x3D that PCD_Init writes. Data is being corrupted in");
+    logStep("         transit. Check jumper seating and routing, then re-run.");
   }
 
-  /* B2: the library's own self-test drives the chip's internal test bus and
-   * compares against reference firmware images.
+  /* B2: the library's own self-test.
    *
-   * A failure here is only a hard failure on a genuine NXP part. Clones report
-   * version 0x88 and their internal test values do not match the NXP reference
-   * tables, so they fail this check while still reading cards perfectly well.
-   * Treating that as fatal would send someone debugging a working reader. */
+   * READ THE LIBRARY SOURCE BEFORE TRUSTING THIS RESULT. PCD_PerformSelfTest()
+   * switches on VersionReg to pick a reference table and returns false from its
+   * `default:` case:
+   *
+   *     case 0x88: reference = FM17522_firmware_reference; break;
+   *     case 0x90: ... case 0x91: ... case 0x92: ...
+   *     default:   return false;   // abort test
+   *
+   * So for ANY version byte outside {0x88, 0x90, 0x91, 0x92} it returns false
+   * without comparing a single byte. The result carries no information about the
+   * chip's health. Reporting that as a hardware failure sends someone debugging
+   * a reader that works, which is exactly what happened on the first run of this
+   * phase with a 0x82 module.
+   *
+   * There is also a documented subtlety worth knowing: the self-test result
+   * depends on the RcvOff bit of CommandReg, which soft reset sets to 1. The
+   * library writes a bare PCD_CalcCRC (0x03), clearing RcvOff, so it gets this
+   * right - but hand-rolled self-test code that preserves RcvOff gets wrong
+   * results even on genuine hardware. */
   bool selfTestOk = s_rfid.PCD_PerformSelfTest();
   ptLogf("B2: PCD_PerformSelfTest() = %s", selfTestOk ? "true" : "false");
+  PtVersionClass b2class = ptVersionClass(version);
   if (selfTestOk) {
     recordResult("B2-selftest", PT_PASS, "Chip internal self-test passed");
-  } else if (version == 0x88) {
-    recordResult("B2-selftest", PT_VISUAL,
-                 "Clone chip: self-test mismatch is expected, not a fault");
-  } else {
+  } else if (b2class == PT_VER_GENUINE) {
     recordResult("B2-selftest", PT_FAIL,
-                 "Self-test failed on a genuine part - suspect power or SPI");
+                 "Self-test failed on a GENUINE part - suspect power or SPI");
+    logStep("    A genuine 0x90/0x91/0x92 part has a reference table, so this");
+    logStep("    failure is meaningful. Check the 3V3 rail under load and the");
+    logStep("    jumper routing.");
+  } else {
+    recordResult("B2-selftest", PT_WARN,
+                 "Self-test unavailable: library has no table for this version");
+    ptLogf("    VersionReg is 0x%02X, which is not one of 0x88/0x90/0x91/0x92,", version);
+    logStep("    so the library returned false from its default case WITHOUT");
+    logStep("    comparing anything. This says nothing about the chip's health.");
+    logStep("    Judge the reader by B3/B4/B5 - whether it actually reads a card.");
   }
 
   /* Re-init after the self-test: it leaves the chip's test registers modified,
@@ -710,9 +799,70 @@ inline void phaseB_run(void) {
                  "Still sees a card after 10s - is it still on the reader?");
   }
 
+  /* ── BOTTOM LINE ─────────────────────────────────────────────────────────
+   * This is the verdict that actually matters, and it is printed last so it is
+   * the thing the operator reads.
+   *
+   * WHY IT EXISTS: the checks above include several that a perfectly good
+   * counterfeit module cannot pass - an unrecognised VersionReg, a self-test the
+   * library refuses to run, analog registers with different defaults. Scored
+   * naively those add up to "4 hard failures, do not start Stage 1b" for a reader
+   * that had just read the same UID five times out of five. The functional result
+   * has to outrank the cosmetic ones.
+   *
+   * What PhishTap Lite actually needs from this reader is narrow: detect a card,
+   * read a stable 4-byte UID, and notice when the card goes away. It never
+   * authenticates, never reads memory blocks and never writes. So B3, B4 and B5
+   * ARE the acceptance criteria, and everything in B0-B2 is supporting detail.
+   */
   logStep("");
-  logStep("Phase B done. The reader is usable, so later phases will ask you");
-  logStep("to confirm results by TAPPING THE CARD.");
+  logStep("================ PHASE B BOTTOM LINE ================");
+  if (gotCard && goodReads == 5 && allMatch && removed && uidShapeOk) {
+    ptMatrixShowText2("OK");
+    recordResult("B-BOTTOM-LINE", PT_PASS,
+                 "READER WORKS - reads a stable 4-byte UID and detects removal");
+    logStep("  THE READER WORKS. It detected a card, returned the same 4-byte");
+    logStep("  UID on 5 consecutive reads, and noticed when the card was taken");
+    logStep("  away. That is everything PhishTap Lite needs from it.");
+    logStep("");
+    logStep("  Any WARN rows above are cosmetic. This project is read-only by");
+    logStep("  policy, so the weaknesses that counterfeit RC522 modules are known");
+    logStep("  for - unreliable writes, occasionally refusing certain tag types -");
+    logStep("  do not affect it.");
+    logStep("");
+    logStep("  Two practical notes for the demo:");
+    logStep("    - Use the WHITE MIFARE card. Clones often fail on blue keyfobs.");
+    logStep("    - Clone antennas are weaker, so hold the card flat against the");
+    logStep("      reader rather than hovering it.");
+    logStep("");
+    logStep("  Stage 1b is unblocked.");
+  } else if (gotCard && goodReads == 5 && allMatch) {
+    ptMatrixShowText2("OK");
+    recordResult("B-BOTTOM-LINE", PT_PASS,
+                 "READER WORKS - stable UID reads (removal check inconclusive)");
+    logStep("  The reader reads a stable UID reliably, which is the core");
+    logStep("  requirement. The removal check did not confirm, which usually just");
+    logStep("  means the card was still on the reader when the 10s elapsed.");
+    logStep("  Re-run and lift the card promptly, but this does not block Stage 1b.");
+  } else if (gotCard) {
+    ptMatrixShowText2("ER");
+    recordResult("B-BOTTOM-LINE", PT_FAIL,
+                 "Card detected but reads are NOT stable");
+    logStep("  A card was detected but consecutive reads disagreed. That is a");
+    logStep("  real problem: the game would assign players inconsistently.");
+    logStep("  Suspect marginal contact or antenna coupling. Shorten jumpers,");
+    logStep("  keep them away from the coil, and hold the card flat.");
+  } else {
+    ptMatrixShowText2("ER");
+    recordResult("B-BOTTOM-LINE", PT_FAIL, "No card could be read");
+    logStep("  No UID was read at all. Work through the B0 decision above, then");
+    logStep("  Phase W for the electrical layer and Phase L for the board itself.");
+  }
+  logStep("======================================================");
+
+  logStep("");
+  logStep("Phase B done. If the bottom line above is PASS, later phases will");
+  logStep("ask you to confirm results by TAPPING THE CARD.");
 }
 
 #endif /* PHASE_B_RFID_H */

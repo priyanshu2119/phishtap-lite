@@ -642,6 +642,12 @@ No hard failures.
 | No console output at all | `arduino-router` not running | `systemctl status arduino-router`, then `sudo systemctl restart arduino-router` |
 | No console output, router fine | Wrong console tab | Read the **Serial monitor** tab, not Python or App Launch |
 | Serial monitor empty even though the matrix animates | The tab was opened after `setup()` already printed | Deploy with `--loop` so the run repeats, or open the tab before pressing Run |
+| `VersionReg = 0x82` (or `0x12`, `0x18`, `0x8C`, `0xB0`, `0xB2`, `0xB3`) | Counterfeit die | **Not a fault.** These read cards fine. Judge by the Phase B BOTTOM LINE, not the version |
+| `B2-selftest FAIL` with an unrecognised version | `PCD_PerformSelfTest()` returns false from its `default:` case without comparing anything | **Meaningless on a clone.** Ignore it; B3/B4/B5 are the real test |
+| B0a: all digital registers match, analog ones differ | Counterfeit die with a different analog front end | **Not a fault.** Reported as WARN. The reader still works |
+| B1b: `RFCfgReg` not `0x70` after `PCD_Init()` but `ModeReg` is `0x3D` | Clones implement the RxGain field differently | **Not a fault.** ModeReg matching is the write proof |
+| Phase L fails with stable-but-wrong bytes | The RC522 is still connected | Counterfeit modules drive MISO even when deselected. Remove all seven wires |
+| Blue keyfob never reads, white card does | Clone antenna, or the fob is 125 kHz | Use the white MIFARE card. Test the fob with an Android phone's NFC |
 | `VersionReg = 0x00` at **every** clock (100 kHz, 1 MHz, 4 MHz) | MISO held low for the whole transfer. Speed-independence rules out signal integrity | Run **Step 0** (LED power test), then **Phase L**, then **Phase W**. See the table below |
 | `VersionReg = 0xFF` at every clock | MISO floating or held high | Check MISO is really in D12, and look for a jumper on **IOREF** (a 3V3 output two pins from 3V3) |
 | B0a fingerprint: **all ten** registers read `0x00` | Bus dead or module unpowered | Phase W will tell you which. An unpowered RC522 clamps MISO low through its ESD diode, which looks exactly like a short to ground |

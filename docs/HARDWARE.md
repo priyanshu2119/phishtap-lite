@@ -524,6 +524,76 @@ overwrites ModeReg, TxASKReg, TModeReg, TPrescalerReg, TReloadRegH/L and RFCfgRe
 Reading the same registers *after* `PCD_Init()` is also useful, but for the
 opposite reason: it proves that writes reach the chip and not only reads.
 
+### Counterfeit modules are normal, and they work
+
+The module on this bench reports `VersionReg = 0x82`. That is not a documented NXP
+version. The datasheet lists only 91h (v1.0) and 92h (v2.0), and the library
+additionally knows 90h (v0.0) and 88h (Fudan FM17522).
+
+Values outside that set mean a counterfeit die. `miguelbalboa/rfid` issue #428,
+"[Collection] Bad boards", collects reports of `0x12`, `0x18`, `0x82`, `0x88`,
+`0x8C`, `0xB0`, `0xB2` and `0xB3`, and the consistent theme in that thread is that
+these modules **read cards anyway**. Quoted from it: boards reporting `0xB2`
+"work absolutely fine with the white credit card tags", and another user found
+"the 0xB2 version fails the selftest, but still manages to read the UID most of
+the times".
+
+The measured fingerprint on this module makes the counterfeit diagnosis concrete:
+
+| Register | Class | NXP reset | Read | |
+|---|---|---|---|---|
+| CommandReg | digital | 0x20 | 0x20 | match |
+| ComIEnReg | digital | 0x80 | 0x80 | match |
+| Status1Reg | digital | 0x21 | 0x21 | match |
+| ModeReg | digital | 0x3F | 0x3F | match |
+| TxControlReg | digital | 0x80 | 0x80 | match |
+| GsNReg | analog | 0x88 | 0x88 | match |
+| AutoTestReg | digital | 0x40 | 0x40 | match |
+| RxThresholdReg | analog | 0x84 | 0x42 | differs |
+| DemodReg | analog | 0x4D | 0x5D | differs |
+| RFCfgReg | analog | 0x48 | 0x44 | differs |
+
+Every digital register matched exactly. The three that differ are all receiver
+analog front-end configuration. That is the signature of a die with identical
+digital logic and a different analog design, which is what a counterfeit is. A
+broken bus does not produce seven exact matches and three analog-only misses; it
+produces zeroes.
+
+The same module then read a card UID `C7 DA 41 04` with `SAK 0x08` (MIFARE 1K),
+returned it identically on five consecutive reads, and detected removal.
+
+**Consequence for the self-test verdicts.** Three checks cannot pass on a
+counterfeit module and none of them indicate a fault:
+
+1. `PCD_PerformSelfTest()` switches on the version byte and returns `false` from
+   its `default:` case, **before comparing anything**. For any version outside
+   `{0x88, 0x90, 0x91, 0x92}` the result carries no information about the chip.
+2. The analog register defaults differ, as tabulated above.
+3. `RFCfgReg` after `PCD_Init()` does not reach the `0x70` that
+   `PCD_SetAntennaGain(RxGain_max)` writes, because clones implement the gain
+   field differently. `ModeReg` reaching `0x3D` is the reliable write proof.
+
+So the selftest scores digital registers as proof of a working bus, treats analog
+mismatches as advisories, and takes B3/B4/B5 — did it actually read a stable UID
+and notice removal — as the acceptance criteria. That matches what this project
+needs, since it is read-only by policy and never authenticates, reads memory or
+writes.
+
+Known trade-offs of counterfeit modules, from the same issue thread:
+
+- Shorter read range, often 2-3 cm rather than 5 cm.
+- Some refuse certain tag types. Blue keyfobs are specifically called out, which
+  matters here because the kit includes one. Use the white MIFARE card.
+- Write operations are unreliable or absent. Irrelevant to a read-only project.
+- One user measured that read performance correlates with antenna impedance
+  matching rather than with the chip itself, and that swapping the chip did not
+  improve a poorly made board.
+
+A separate report in that thread matters for Phase L: counterfeit modules may
+**drive MISO even when their chip select is not asserted**. That corrupts an SPI
+loopback test, which is why Phase L requires the reader to be physically removed
+rather than merely deselected.
+
 ### PCD_Init does not guarantee a hardware reset
 
 ```cpp

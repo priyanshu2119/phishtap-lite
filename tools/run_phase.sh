@@ -13,7 +13,7 @@
 #   tools/run_phase.sh B        Full RC522 test. RC522 wired.
 #   tools/run_phase.sh A        Board only, no wiring.
 #   tools/run_phase.sh C        Lives LEDs and buzzer (C1,C2,C3).
-#   tools/run_phase.sh diag     The full RC522 investigation: L then W then B.
+#   tools/run_phase.sh diag     RC522 investigation: W then B (reader stays wired)
 #   tools/run_phase.sh all      Every phase.
 #
 # OPTIONS
@@ -57,7 +57,7 @@ case "$MODE" in
   W)    PHASES="W" ;;
   B)    PHASES="B" ;;
   C)    PHASES="C1,C2,C3" ;;
-  DIAG) PHASES="L,W,B" ;;
+  DIAG) PHASES="W,B" ;;
   ALL)  PHASES="all" ;;
   *)    echo "run_phase: unknown mode '$MODE'. Use A, L, W, B, C, diag or all." >&2
         exit 2 ;;
@@ -260,23 +260,21 @@ EOF
 
   DIAG)
     cat <<'EOF'
-THE FULL RC522 INVESTIGATION, in the order that isolates the fault fastest.
+THE RC522 INVESTIGATION: Phase W then Phase B, with the reader WIRED throughout.
 
-  Phase L  RC522 REMOVED, one jumper D11 -> D12. Proves the board's SPI works.
-  Phase W  RC522 wired. Proves the module is powered and connected.
-  Phase B  RC522 wired. The full reader test.
+  Phase W  Proves the module is powered and connected, electrically.
+  Phase B  The full reader test, ending in a BOTTOM LINE verdict.
 
-You will be asked to change the wiring twice. Each change is announced on the
-console AND scrolled on the LED matrix, then a countdown runs. The console cannot
-take keystrokes, so the countdown is the only way to tell the board you are ready.
+Phase L is deliberately NOT part of this. It needs the RC522 completely removed
+and a D11-D12 loopback jumper fitted, so it is a one-time test of the BOARD rather
+than of the reader. Run it separately with `tools/run_phase.sh L` if you ever need
+to re-prove the board's SPI. Running it with the reader still attached produces a
+confusing failure, because counterfeit RC522 modules drive MISO even when their
+chip select is not asserted.
 
-If Phase L passes and Phase W says the module is powered and driving MISO, but
-Phase B still cannot read a register, the fault is at the protocol layer and the
-B0c and B1b output is what to study.
-
-Do the LED power test in the README FIRST if you have not already. It takes two
-minutes and proves which physical header pins are really 3V3 and GND, which is the
-thing most likely to be wrong given how crowded JANALOG is.
+Read the BOTTOM LINE at the end of Phase B, not the individual WARN rows. A
+counterfeit module cannot pass the version check or the library self-test, and
+neither matters: this project only reads UIDs.
 EOF
     ;;
 
