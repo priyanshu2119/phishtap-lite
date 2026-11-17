@@ -129,13 +129,15 @@ inline bool ptRfidVersionDocumented(uint8_t v) {
 }
 
 /* ── Initialisation ───────────────────────────────────────────────────────
- * BLOCKING, AND ONLY CALLED FROM setup().
+ * BLOCKING, AND ONLY CALLED FROM setup() OR FROM THE RATE-LIMITED RECOVERY PATH.
  *
  * The delays below are the datasheet's oscillator start-up requirement and
  * cannot be made non-blocking without splitting init across many loop()
  * iterations for no benefit, since nothing else can run until the reader exists.
+ *
+ * This is ONE attempt. ptRfidBegin() below wraps it with retries.
  */
-inline bool ptRfidBegin(void) {
+inline bool ptRfidInitOnce(void) {
   memset(&s_rs, 0, sizeof(s_rs));
   s_rs.state = PT_RFID_ST_UNINIT;
 
@@ -186,6 +188,43 @@ inline bool ptRfidBegin(void) {
   s_rs.lastPollMs  = millis();
   s_rs.lastProbeMs = s_rs.lastPollMs;
   return true;
+}
+
+/* Initialise the reader, retrying on failure.
+ *
+ * A single attempt is not enough at cold boot: the first hardware run of this
+ * firmware read VersionReg as 0x00 in setup() and only started working when the
+ * recovery path re-initialised it seconds later. The module was never broken, it
+ * was just not ready that early. See PT_RFID_INIT_ATTEMPTS in pt_config.h.
+ *
+ * Every attempt logs, because "the reader failed and then worked" is exactly the
+ * kind of intermittent behaviour that is impossible to diagnose later from a
+ * single line saying it succeeded. Knowing it took three tries tells you the
+ * module is slow to wake, which is worth knowing before a demo.
+ */
+inline bool ptRfidBegin(void) {
+  for (uint8_t attempt = 1; attempt <= PT_RFID_INIT_ATTEMPTS; ++attempt) {
+    if (ptRfidInitOnce()) {
+      if (attempt > 1) {
+        Serial.print("[rfid] init succeeded on attempt ");
+        Serial.print((unsigned)attempt);
+        Serial.print(", version 0x");
+        Serial.println(s_rs.version, HEX);
+      }
+      return true;
+    }
+    Serial.print("[rfid] init attempt ");
+    Serial.print((unsigned)attempt);
+    Serial.print("/");
+    Serial.print((unsigned)PT_RFID_INIT_ATTEMPTS);
+    Serial.print(" failed, VersionReg=0x");
+    Serial.print(s_rs.version, HEX);
+    Serial.println(" (0x00 or 0xFF means nothing answered on the bus)");
+    if (attempt < PT_RFID_INIT_ATTEMPTS) delay(PT_RFID_INIT_RETRY_MS);
+  }
+  Serial.println("[rfid] init FAILED after all attempts - reader will be "
+                 "reported as faulted and retried at runtime");
+  return false;
 }
 
 inline bool ptRfidOk(void) {

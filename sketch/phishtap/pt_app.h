@@ -308,11 +308,23 @@ inline void ptAppBootStep(uint32_t now) {
       ptApp.selftestMatrix = ptApp.matrixInit;
       ptApp.selftestRfid   = ptApp.rfidOk;
       ptLivesSetCount(PT_MAX_LIVES);
-      ptAppSetState(PT_ST_IDLE);
-      /* Announce the handover. Without this the last thing on the console is the
-       * boot banner, and a selftest that quietly stopped advancing would look
-       * identical to one that completed. */
-      Serial.println("[boot] selftest complete, entering IDLE / attract mode");
+      /* Only advance to IDLE if boot did not already put us in ERROR.
+       *
+       * This used to set IDLE unconditionally, which silently erased a real
+       * hardware failure: ptAppBegin() sets ERROR when the reader or matrix
+       * fails, then this step ran a second later and overwrote it, so the
+       * console looked healthy while its status payload said otherwise. A
+       * selftest must not be able to clear the verdict it was asked to report. */
+      if (ptApp.state != PT_ST_ERROR) {
+        ptAppSetState(PT_ST_IDLE);
+        /* Announce the handover. Without this the last thing on the console is
+         * the boot banner, and a selftest that quietly stopped advancing would
+         * look identical to one that completed. */
+        Serial.println("[boot] selftest complete, entering IDLE / attract mode");
+      } else {
+        Serial.println("[boot] selftest finished, staying in ERROR - a subsystem "
+                       "failed to initialise");
+      }
       break;
     default:
       break;
@@ -498,6 +510,20 @@ inline void ptAppLoop(void) {
      * have, because from the outside it is indistinguishable from a dead reader. */
     ptRingPushCardTap(&ptRing, now, ptRfidGetUidHex(), ptRfidGetUidLen());
 
+    /* Decide the outcome ONCE, then log it and act on it.
+     *
+     * Evaluating the condition separately for the log line and for the action is
+     * how the two drift apart, and that is precisely what happened when the
+     * link-down case was added: the action gained a third branch while the log
+     * still reported a two-way "accepted / REFUSED (busy)", so a tap that stayed
+     * in IDLE was logged as accepted. A single decision variable makes that
+     * impossible. It is also evaluated before any state change, so the answer
+     * cannot be affected by the action it selects. */
+    uint8_t action;
+    if (!ptApp.linkOk)                          action = 0;   /* nobody to hand over to */
+    else if (ptStateAcceptsTap(ptApp.state))    action = 1;   /* accept */
+    else                                        action = 2;   /* busy */
+
     /* Log it. This is the single most useful line in the whole firmware during
      * bring-up: it proves the reader, the state machine and the ring all work,
      * with no Python side required to observe any of it. */
@@ -509,11 +535,32 @@ inline void ptAppLoop(void) {
     Serial.print(ptRfidGetSak(), HEX);
     Serial.print(" seq=");
     Serial.print((unsigned long)ptRing.newestSeq);
-    Serial.println(ptStateAcceptsTap(ptApp.state) ? "  accepted" : "  REFUSED (busy)");
+    Serial.print(" state=");
+    Serial.print(ptStateName(ptApp.state));
+    switch (action) {
+      case 0:  Serial.println("  queued, NO LINK so staying idle"); break;
+      case 1:  Serial.println("  ACCEPTED -> tapped");              break;
+      default: Serial.println("  REFUSED (busy)");                  break;
+    }
 
-    if (ptStateAcceptsTap(ptApp.state)) {
+    if (action == 1) {
       ptAppSetState(PT_ST_TAPPED);
       ptBuzzPlay(BUZZ_WELCOME);
+    } else if (action == 0) {
+      /* The link is down, so nobody will ever answer this tap.
+       *
+       * Latching into TAPPED here would be actively harmful: TAPPED is only
+       * released by Python calling pt.set_state, so with no Python side the
+       * console would sit in TAPPED forever and refuse every subsequent tap as
+       * busy. That is exactly what the first hardware run showed - one accepted
+       * tap, then REFUSED (busy) for the rest of the session, with "BU" stuck on
+       * the panel.
+       *
+       * The event is still queued above, so nothing is lost if Python comes back.
+       * We just do not hand over to a party that is not there, and the console
+       * stays in IDLE so the reader remains testable. */
+      ptMatrixShowText2("NL");      /* no link */
+      ptBuzzPlay(BUZZ_JOIN);
     } else {
       /* A tap while busy is refused locally for immediate feedback, but the
        * event is still queued so Python can log it and decide what to do. */
@@ -522,14 +569,36 @@ inline void ptAppLoop(void) {
     }
   }
 
-  /* 5. Periodic recovery attempt if the reader faulted. Rate-limited to once
-   *    every five seconds: a reader that has genuinely failed must not be
-   *    re-initialised on every loop iteration, which would both starve the other
-   *    engines and spend all its time resetting rather than trying to read. */
-  if (!ptApp.rfidOk && (uint32_t)(now - ptApp.lastRecoverMs) >= 5000) {
+  /* 5. Periodic recovery attempt if the reader faulted. Rate-limited, because a
+   *    reader that has genuinely failed must not be re-initialised on every loop
+   *    iteration: that would starve the other engines and spend all its time
+   *    resetting rather than trying to read. */
+  if (!ptApp.rfidOk && (uint32_t)(now - ptApp.lastRecoverMs) >= PT_RFID_RECOVER_MS) {
     ptApp.lastRecoverMs = now;
     if (ptRfidTryRecover()) {
       ptApp.rfidOk = true;
+      /* REFRESH THE CACHED VERSION. This was missing, and it produced the most
+       * confusing line in the first hardware run:
+       *
+       *     [status] state=idle rfid=ok(v0x00) rfid_st=seek ...
+       *
+       * rfid=ok next to v0x00 is self-contradictory, because 0x00 is the one
+       * value that means "nothing answered". What had happened is that the first
+       * init at cold boot read 0x00 and faulted, the recovery path then
+       * re-initialised successfully and set rfidOk, but the version field still
+       * held the stale 0x00 from the failed attempt. The status line was
+       * reporting a value that had been untrue for minutes.
+       *
+       * Any cached copy of hardware state must be refreshed whenever the
+       * hardware is re-read, or the cache quietly becomes a lie. */
+      ptApp.rfidVersion           = ptRfidGetVersion();
+      ptApp.rfidVersionDocumented = ptRfidVersionIsDocumented();
+      ptApp.selftestRfid          = true;
+
+      Serial.print("[rfid] RECOVERED, version 0x");
+      Serial.print(ptApp.rfidVersion, HEX);
+      Serial.println(ptApp.rfidVersionDocumented ? "" : " (counterfeit die, expected)");
+
       ptRingPushHwFault(&ptRing, now, PT_FAULT_NONE);   /* recovery notice */
       if (ptApp.state == PT_ST_ERROR) ptAppSetState(PT_ST_IDLE);
     }

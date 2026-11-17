@@ -75,6 +75,31 @@
  * read errors, not absence of cards. */
 #define PT_RFID_FAULT_THRESHOLD   8
 
+/* Reader initialisation retries, and the pause between them.
+ *
+ * ADDED AFTER A REAL FAILURE, NOT AS PRECAUTION. On the first hardware run of
+ * this firmware, VersionReg read 0x00 during setup() even though the very same
+ * module read 0x82 and then cards perfectly seconds later, once the periodic
+ * recovery path re-initialised it. The reader was fine; it simply was not ready
+ * that early in a cold boot.
+ *
+ * hw_selftest never showed this because it runs an 8 second startup countdown and
+ * several phases of raw SPI probing before it calls PCD_Init, so the module has
+ * long since settled. Production calls it almost immediately after reset.
+ *
+ * Retrying is the standard answer and costs at most
+ * PT_RFID_INIT_ATTEMPTS * PT_RFID_INIT_RETRY_MS of boot time. Each attempt
+ * re-runs the full hardware reset, so a retry is a genuine fresh start rather
+ * than a repeated read of the same settled state. */
+#define PT_RFID_INIT_ATTEMPTS     5
+#define PT_RFID_INIT_RETRY_MS     50
+
+/* How often to retry initialisation after the reader has faulted at runtime.
+ * A reader that has genuinely failed must not be re-initialised on every loop
+ * iteration, which would both starve the other engines and spend all its time
+ * resetting rather than trying to read. */
+#define PT_RFID_RECOVER_MS        5000
+
 /* ── Display and feedback ─────────────────────────────────────────────────
  * Matrix animation frame interval, per docs/ARCHITECTURE.md §5. 80 ms is
  * 12.5 fps, which reads as smooth motion on a 13-column scroller and is slow
