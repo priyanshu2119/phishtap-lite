@@ -287,6 +287,11 @@ Run and watch.
 | Symptom | Cause | Fix |
 |---|---|---|
 | App does not appear in the Apps list, and "Create new app" says the name is already in use | `app.yaml` is missing at the app root. App Lab discovers apps by that file, not by the existence of a `sketch/` folder | `tools/deploy_to_board.sh --sketch phishtap` now creates the scaffold. If it is still missing, check `/home/arduino/ArduinoApps/phishtap/app.yaml` over adb |
+| Panel blinks blue on and off ~15 s after boot | **Correct behaviour.** No Python side is polling, so the link-loss safety fired. It blinks for 6 s then returns to attract mode | Nothing to fix. Stage 2 removes it by actually polling |
+| `NL` on the panel after a card tap | The link is down, so the tap was queued but not handed over to a session | Expected until Stage 2 exists. The tap is still in the event ring |
+| `BU` stuck on the panel, every tap `REFUSED (busy)` | Fixed. The console used to latch into `TAPPED`, which only Python can release | Update to the firmware that only latches `TAPPED` when the link is up |
+| `rfid=ok(v0x00)` in the status line | Fixed. The reader faulted at cold boot, recovered at runtime, but the cached version byte was never refreshed | Update to the firmware that refreshes cached hardware state on recovery |
+| `[rfid] init attempt 1/5 failed, VersionReg=0x00` then success | The module is slow to wake at cold boot. Normal, and why init retries | Nothing to fix, but if it takes many attempts every boot, check the 3V3 rail and the solder joints |
 | `bridge: Bridge.begin() FAILED` | the `arduino-router` service is down | `adb shell systemctl status arduino-router` |
 | `bridge: bound pt.X FAILED` | the router already has that name bound, usually from a previous run | restart the app; the router releases bindings on process exit |
 | No `[rpc]` lines at all | Python is not polling, or is calling the wrong method names | check the Stage 2 adapter; method names are `pt.` prefixed |
