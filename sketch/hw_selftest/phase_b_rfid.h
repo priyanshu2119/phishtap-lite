@@ -174,7 +174,10 @@ inline void rfidRepeatRead(uint8_t rawAddr, uint32_t clockHz, uint8_t repeats) {
     delay(2);
   }
 
-  ptLogf("      %u reads of 0x%02X: %u identical to the first (0x%02X), %u distinct value(s)",
+  /* Name the register, not just its address. Printing "20 reads of 0x37" reads
+   * as though 0x37 were the value returned, when 0x37 is the VersionReg address
+   * and the value is the 0x82 quoted later on the same line. */
+  ptLogf("      %u reads of VersionReg (addr 0x%02X): %u identical to the first (0x%02X), %u distinct value(s)",
          (unsigned)repeats, rawAddr, (unsigned)same, first, (unsigned)distinct);
   logStep("      values seen:");
   for (uint8_t k = 0; k < distinct; ++k) ptLogf("        0x%02X", seen[k]);
@@ -585,7 +588,22 @@ inline void phaseB_run(void) {
     recordResult("B5-removal", PT_SKIP, "Skipped: no SPI response");
     return;
   }
-  recordResult("B1-spi", PT_PASS, ptVersionName(version));
+  /* B1 tests one thing: whether the library's own SPI path reaches the chip.
+   * Say that. Recording the bare version string made the summary read
+   * "B1-spi PASS COUNTERFEIT/clone die", which looks like a contradiction and
+   * hides the fact that this row is a pass. The clone detail already lives in
+   * B0-fingerprint and the bottom line, so a short tag is enough here. */
+  {
+    char b1Detail[72];
+    PtVersionClass b1Class = ptVersionClass(version);
+    snprintf(b1Detail, sizeof(b1Detail), "Library SPI works, version 0x%02X%s",
+             version,
+             (b1Class == PT_VER_GENUINE)      ? "" :
+             (b1Class == PT_VER_KNOWN_CLONE)  ? " (FM17522 clone)" :
+             (b1Class == PT_VER_DEAD)         ? " (no response)" :
+                                                " (clone die)");
+    recordResult("B1-spi", PT_PASS, b1Detail);
+  }
 
   /* ── B1b: prove that WRITES reach the chip, not just reads ───────────────
    * PCD_Init() has just run, and it writes known values to registers whose reset

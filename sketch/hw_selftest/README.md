@@ -623,9 +623,62 @@ B3: PLACE A CARD on the reader now (30s timeout)
   A2-matrix VISUAL  Confirm all 6 patterns by eye; panel has no readback
   ...
 =============================================
-No hard failures.
+No blocking failures.
 2 row(s) marked VISUAL need your eyes or ears - see the log above.
 ```
+
+### What a counterfeit module looks like, and why it still passes
+
+Most RC522 modules sold today are clones. This is the real output from the module
+on this bench, which reports `VersionReg = 0x82`:
+
+```
+B0a: post-reset register fingerprint (raw SPI, library bypassed)
+      register        addr   expected   actual   class    match
+      CommandReg       0x01   0x20       0x20     digital  yes
+      ComIEnReg        0x02   0x80       0x80     digital  yes
+      Status1Reg       0x07   0x21       0x21     digital  yes
+      ModeReg          0x11   0x3F       0x3F     digital  yes
+      TxControlReg     0x14   0x80       0x80     digital  yes
+      GsNReg           0x27   0x88       0x88     analog   yes
+      AutoTestReg      0x36   0x40       0x40     digital  yes
+      RxThresholdReg   0x18   0x84       0x42     analog   NO
+      DemodReg         0x19   0x4D       0x5D     analog   NO
+      RFCfgReg         0x26   0x48       0x44     analog   NO
+      digital registers: 6/6 match (these prove the bus and chip)
+      analog registers:  1/4 match (clone dies differ here by design)
+
+>>> [B0-fingerprint] WARN - Digital regs match; analog differ - counterfeit die
+>>> [B1-spi] PASS - Library SPI works, version 0x82 (clone die)
+>>> [B1b-writes] PASS - ModeReg changed as PCD_Init writes
+>>> [B2-selftest] WARN - Self-test unavailable: library has no table for this version
+>>> [B3-uid] PASS - C7 DA 41 04
+>>> [B4-stable] PASS - 5/5 identical reads
+>>> [B5-removal] PASS - Removal detected via WUPA timeout
+
+================ PHASE B BOTTOM LINE ================
+>>> [B-BOTTOM-LINE] PASS - READER WORKS - reads a stable 4-byte UID and detects removal
+
+================= SUMMARY ==================
+  ...
+=============================================
+No blocking failures.
+2 advisory warning(s) - read them, but they do not block progress.
+```
+
+Read the **BOTTOM LINE**, not the WARN rows. The two warnings are unavoidable on
+any clone and neither indicates a fault:
+
+- `B0-fingerprint` - every **digital** register matched its NXP reset value
+  exactly, including `AutoTestReg`, which reads `0x00` on a dead bus. Only the
+  three **analog** receiver registers differed. A wiring fault gives zeroes
+  across the digital registers too. Seven exact digital matches plus three
+  analog-only misses is the signature of a clone die, not a broken bus.
+- `B2-selftest` - `PCD_PerformSelfTest()` switches on the version byte and
+  returns `false` from its `default:` case **before comparing anything**. For any
+  version outside `0x88/0x90/0x91/0x92` the result carries no information.
+
+See `docs/HARDWARE.md` for the full counterfeit analysis and the known trade-offs.
 
 ---
 

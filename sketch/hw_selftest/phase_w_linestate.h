@@ -206,17 +206,16 @@ inline void phaseW_run(void) {
 
   logStep("");
   logStep("W2: interpretation");
-  logStep("    SS HIGH, pull-up   : " );
-  ptLogf("      %s", ptWClassify(hiPuOnes, hiPuS));
+  /* Label and classification on ONE line. Printing the label with a trailing
+   * colon and the value on the next line left a dangling colon on four rows,
+   * which reads like truncated output rather than a table. */
+  ptLogf("    SS HIGH, pull-up    : %s", ptWClassify(hiPuOnes, hiPuS));
 #if PT_HAS_PULLDOWN
-  logStep("    SS HIGH, pull-down : ");
-  ptLogf("      %s", ptWClassify(hiPdOnes, hiPdS));
+  ptLogf("    SS HIGH, pull-down  : %s", ptWClassify(hiPdOnes, hiPdS));
 #endif
-  logStep("    SS LOW,  pull-up   : ");
-  ptLogf("      %s", ptWClassify(loPuOnes, loPuS));
+  ptLogf("    SS LOW,  pull-up    : %s", ptWClassify(loPuOnes, loPuS));
 #if PT_HAS_PULLDOWN
-  logStep("    SS LOW,  pull-down : ");
-  ptLogf("      %s", ptWClassify(loPdOnes, loPdS));
+  ptLogf("    SS LOW,  pull-down  : %s", ptWClassify(loPdOnes, loPdS));
 #endif
   ptLogf("    deselected line follows the pull (healthy high-Z): %s",
          hiFollowsPull ? "YES" : "no");
