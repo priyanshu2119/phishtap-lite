@@ -15,16 +15,24 @@
 #   being difficult.
 #
 # USAGE
-#   tools/deploy_to_board.sh                    deploy, phases unchanged
-#   tools/deploy_to_board.sh --phases=A         deploy with only Phase A enabled
+#   tools/deploy_to_board.sh                          deploy hw_selftest, phases unchanged
+#   tools/deploy_to_board.sh --sketch phishtap        deploy the production firmware
+#   tools/deploy_to_board.sh --phases=A               deploy with only Phase A enabled
 #   tools/deploy_to_board.sh --phases=A,B
-#   tools/deploy_to_board.sh --phases=L         SPI loopback, RC522 REMOVED
-#   tools/deploy_to_board.sh --phases=W         MISO line state, RC522 wired
+#   tools/deploy_to_board.sh --phases=L               SPI loopback, RC522 REMOVED
+#   tools/deploy_to_board.sh --phases=W               MISO line state, RC522 wired
 #   tools/deploy_to_board.sh --phases=all
-#   tools/deploy_to_board.sh --app myapp        target a different app folder
-#   tools/deploy_to_board.sh --check-lib        also pre-flight the pinned libraries
-#   tools/deploy_to_board.sh --loop             repeat the selftest forever
-#   tools/deploy_to_board.sh --dry-run          show what would happen
+#   tools/deploy_to_board.sh --app myapp              target a different app folder
+#   tools/deploy_to_board.sh --check-lib              also pre-flight the pinned libraries
+#   tools/deploy_to_board.sh --loop                   repeat the selftest forever
+#   tools/deploy_to_board.sh --dry-run                show what would happen
+#
+#   --sketch selects which folder under sketch/ to push, and defaults to
+#   hw_selftest. The app folder on the board takes the same name unless --app
+#   overrides it. --phases and --loop are hw_selftest-only: they rewrite that
+#   sketch's RUN_PHASE_* and PT_LOOP_FOREVER guards, which the production
+#   firmware does not have, so combining them with another --sketch is rejected
+#   rather than silently doing nothing.
 #
 #   Phase letters: A board only, L SPI loopback (reader removed, D11-D12 jumper),
 #   W MISO line state (reader wired), B full RC522 test, C1/C2/C3 LEDs and buzzer.
@@ -41,8 +49,8 @@
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SKETCH_DIR="$REPO_ROOT/sketch/hw_selftest"
-APP="hw_selftest"
+SKETCH="hw_selftest"
+APP=""
 PHASES=""
 DRY_RUN=0
 CHECK_LIB=0
@@ -50,16 +58,33 @@ LOOP_FOREVER=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
+    --sketch)   SKETCH="${2:?--sketch needs a name}"; shift 2 ;;
+    --sketch=*) SKETCH="${1#--sketch=}"; shift ;;
     --app)     APP="${2:?--app needs a name}"; shift 2 ;;
     --phases)  PHASES="${2:?--phases needs a value}"; shift 2 ;;
     --phases=*) PHASES="${1#--phases=}"; shift ;;
     --check-lib) CHECK_LIB=1; shift ;;
     --loop)    LOOP_FOREVER=1; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
-    -h|--help) sed -n '2,38p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,48p' "$0"; exit 0 ;;
     *)         echo "deploy_to_board: unknown argument '$1'" >&2; exit 2 ;;
   esac
 done
+
+# The app folder on the board defaults to the sketch name, so deploying
+# phishtap lands in /home/arduino/ArduinoApps/phishtap/sketch.
+[ -n "$APP" ] || APP="$SKETCH"
+SKETCH_DIR="$REPO_ROOT/sketch/$SKETCH"
+INO_NAME="$SKETCH.ino"
+
+# --phases and --loop rewrite guards that only exist in hw_selftest. Refusing
+# them outright is better than accepting them and silently pushing an unchanged
+# sketch, which would look like the flags had worked.
+if [ "$SKETCH" != "hw_selftest" ] && { [ -n "$PHASES" ] || [ "$LOOP_FOREVER" -eq 1 ]; }; then
+  echo "deploy_to_board: --phases and --loop apply only to the hw_selftest sketch." >&2
+  echo "  '$SKETCH' has no RUN_PHASE_* or PT_LOOP_FOREVER guards to rewrite." >&2
+  exit 2
+fi
 
 # Allow an explicit adb path, since a SDK install is not always on PATH.
 ADB="${ADB:-adb}"
@@ -77,8 +102,12 @@ if ! command -v "$ADB" >/dev/null 2>&1 && [ ! -x "$ADB" ]; then
   exit 2
 fi
 
-if [ ! -f "$SKETCH_DIR/hw_selftest.ino" ]; then
-  echo "deploy_to_board: cannot find $SKETCH_DIR/hw_selftest.ino" >&2
+if [ ! -f "$SKETCH_DIR/$INO_NAME" ]; then
+  echo "deploy_to_board: cannot find $SKETCH_DIR/$INO_NAME" >&2
+  echo "  Available sketches:" >&2
+  for d in "$REPO_ROOT"/sketch/*/; do
+    [ -d "$d" ] && echo "    --sketch $(basename "$d")" >&2
+  done
   exit 2
 fi
 
@@ -94,7 +123,7 @@ STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"' EXIT
 
 cp "$SKETCH_DIR"/*.h "$STAGE"/ 2>/dev/null || true
-cp "$SKETCH_DIR/hw_selftest.ino" "$STAGE/hw_selftest.ino"
+cp "$SKETCH_DIR/$INO_NAME" "$STAGE/$INO_NAME"
 
 if [ -n "$PHASES" ]; then
   for p in A L W B C1 C2 C3; do
@@ -111,17 +140,17 @@ if [ -n "$PHASES" ]; then
     # Replace the default inside the #ifndef guard. Only the default line is
     # touched, so the guard itself still allows a -D override later.
     perl -0pi -e "s/(#ifndef RUN_PHASE_$p\n#define RUN_PHASE_$p )\\d+/\${1}$want/" \
-      "$STAGE/hw_selftest.ino"
+      "$STAGE/$INO_NAME"
   done
   echo "deploy_to_board: phase selection set to '$PHASES'"
-  grep -n '^#define RUN_PHASE' "$STAGE/hw_selftest.ino" | sed 's/^/    /'
+  grep -n '^#define RUN_PHASE' "$STAGE/$INO_NAME" | sed 's/^/    /'
 fi
 
 if [ "$LOOP_FOREVER" -eq 1 ]; then
   perl -0pi -e 's/(#ifndef PT_LOOP_FOREVER\n#define PT_LOOP_FOREVER )\d+/${1}1/' \
-    "$STAGE/hw_selftest.ino"
+    "$STAGE/$INO_NAME"
   echo "deploy_to_board: PT_LOOP_FOREVER=1 (selftest will repeat indefinitely)"
-  grep -n '^#define PT_LOOP_FOREVER' "$STAGE/hw_selftest.ino" | sed 's/^/    /'
+  grep -n '^#define PT_LOOP_FOREVER' "$STAGE/$INO_NAME" | sed 's/^/    /'
 fi
 
 # ── Gate before pushing ────────────────────────────────────────────────────
@@ -145,6 +174,23 @@ if ! "$REPO_ROOT/tools/no_write_check.sh" >/tmp/pt_nw.$$.log 2>&1; then
 fi
 rm -f /tmp/pt_nw.$$.log
 echo "    no-write policy PASS"
+
+# The host-side unit tests cover the Arduino-free modules (pt_json.h,
+# pt_events.h) that the production firmware depends on. They only exist once
+# sketch/phishtap is present, so the gate is conditional; when it does exist it
+# is mandatory, because a ring buffer that loses an event is undiagnosable from
+# the outside and must not reach the board untested.
+if [ -x "$REPO_ROOT/tools/host_gate.sh" ] && [ -d "$REPO_ROOT/sketch/phishtap" ]; then
+  echo "deploy_to_board: running the host-side unit tests"
+  if ! "$REPO_ROOT/tools/host_gate.sh" >/tmp/pt_host.$$.log 2>&1; then
+    echo "deploy_to_board: REFUSING TO DEPLOY - host tests failed:" >&2
+    tail -40 /tmp/pt_host.$$.log >&2
+    rm -f /tmp/pt_host.$$.log
+    exit 1
+  fi
+  rm -f /tmp/pt_host.$$.log
+  echo "    host unit tests PASS"
+fi
 
 # ── Optional library pre-flight ───────────────────────────────────────────
 # arduino-cli compiles every .cpp in a library's src/, so one broken translation
@@ -193,7 +239,7 @@ if [ "$DRY_RUN" -eq 0 ]; then
   run "$ADB" shell "mkdir -p '$REMOTE_DIR'"
 fi
 
-run "$ADB" push "$STAGE/hw_selftest.ino" "$REMOTE_DIR/sketch.ino"
+run "$ADB" push "$STAGE/$INO_NAME" "$REMOTE_DIR/sketch.ino"
 
 for h in "$STAGE"/*.h; do
   [ -e "$h" ] || continue
