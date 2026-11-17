@@ -104,6 +104,31 @@
  * stopped. Per docs/ARCHITECTURE.md §4. */
 #define PT_LINK_LOSS_MS           15000
 
+/* How long the panel keeps blinking after link loss is detected, before the
+ * console gives up announcing it and returns to attract mode.
+ *
+ * Bounded on purpose. An endless blink turns the console into a brick that
+ * cannot be tested: the reader still works and still queues events, but the
+ * display is permanently occupied by the fault animation so nobody can see a
+ * card tap register. Announce the fault clearly for six seconds, then degrade
+ * gracefully. `link_ok` stays false in pt.get_status the whole time, so Python
+ * is never misled about the link being down.
+ *
+ * This matters most during Stage 1b, when there is no Python side yet and the
+ * link is therefore ALWAYS down. Without this bound the console would blink
+ * forever and be useless for verifying the reader. */
+#define PT_LINK_LOST_BLINK_MS     6000
+
+/* How often to print a one-line status summary to the serial console.
+ *
+ * The firmware otherwise prints only at boot and in response to an RPC. With no
+ * Python polling, that means the console goes completely silent after the first
+ * second, which is indistinguishable from a crash and makes bring-up impossible
+ * to observe. Five seconds is frequent enough to confirm the firmware is alive
+ * and to watch the state and ring counters change, and sparse enough not to
+ * flood the monitor. */
+#define PT_STATUS_LOG_MS          5000
+
 /* ── Response buffers ─────────────────────────────────────────────────────
  * PT_JSON_SMALL covers every response except pt.get_events: the largest of
  * those is pt.get_status at roughly 150 bytes, so 256 leaves room to grow.

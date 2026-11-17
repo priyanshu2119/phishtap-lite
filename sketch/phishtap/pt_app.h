@@ -90,7 +90,9 @@ typedef struct {
    * busy doing something more useful than saying hello. */
   uint32_t lastRpcMs;
   bool     linkOk;
-  bool     linkLostAnnounced;
+  bool     linkLostAnnounced;   /* the loss has been noticed; do not re-announce */
+  bool     linkBlinking;        /* the panel is currently showing the fault blink */
+  uint32_t linkLostSinceMs;     /* when the blink started, so it can be ended */
 
   /* Boot selftest. */
   bool     selftestDone;
@@ -106,6 +108,7 @@ typedef struct {
   uint32_t lastHeartbeatMs;
   uint32_t lastDisplayMs;
   uint32_t lastRecoverMs;
+  uint32_t lastStatusLogMs;
 } PtAppState;
 
 static PtAppState   ptApp;
@@ -202,12 +205,21 @@ inline void ptAppSetState(PtState next) {
  *
  * The blink is announced once rather than every iteration, because re-arming the
  * animation on every loop pass would restart it constantly and it would never
- * actually blink.
+ * actually blink. It is also BOUNDED: after PT_LINK_LOST_BLINK_MS the console
+ * stops blinking and returns to attract mode, so it stays usable and testable
+ * while the link is down. linkOk remains false throughout.
+ *
+ * Two separate flags because they mean two different things. linkLostAnnounced
+ * suppresses re-detecting the same outage; linkBlinking tracks whether the panel
+ * is currently showing the fault animation. Clearing the first to stop the blink
+ * would make the outage re-announce itself on the very next iteration.
  */
-inline void ptAppEnterLinkLost(void) {
+inline void ptAppEnterLinkLost(uint32_t now) {
   if (ptApp.linkLostAnnounced) return;
   ptApp.linkLostAnnounced = true;
-  ptApp.linkOk = false;
+  ptApp.linkBlinking      = true;
+  ptApp.linkLostSinceMs   = now;
+  ptApp.linkOk            = false;
 
   ptCountdownStop();
   ptAppSetState(PT_ST_IDLE);
@@ -216,17 +228,38 @@ inline void ptAppEnterLinkLost(void) {
   ptMatrixAnimStart(PT_MXA_BLINK);
   ptRgbAllOff();
   ptBuzzPlay(BUZZ_ERROR);
-  ptRingPushHwFault(&ptRing, millis(), PT_FAULT_BRIDGE);
+  ptRingPushHwFault(&ptRing, now, PT_FAULT_BRIDGE);
+
+  /* Say so on the console. Without this the panel blinking is the only clue, and
+   * "the whole screen is flashing blue" reads as a hardware fault rather than as
+   * the safety mechanism working exactly as designed. */
+  Serial.println("[link] LOST - no RPC from Python for 15s.");
+  Serial.println("[link]   panel will blink for 6s then return to attract mode.");
+  Serial.println("[link]   this is expected while no Python side is polling.");
+}
+
+/* Stop the fault blink and restore the normal display, without pretending the
+ * link came back. Called once the announcement period has elapsed. */
+inline void ptAppEndLinkBlink(void) {
+  if (!ptApp.linkBlinking) return;
+  ptApp.linkBlinking = false;
+  ptRgbApplyState(ptApp.state);
+  ptAppShowState(ptApp.state);
+  Serial.println("[link] still down, returning to attract mode so the console "
+                 "stays usable");
 }
 
 inline void ptAppNoteLinkAlive(uint32_t now) {
   ptApp.lastRpcMs = now;
   if (!ptApp.linkOk) {
     /* The link came back. Restore the normal display for the current state. */
-    ptApp.linkOk = true;
+    bool wasLost = ptApp.linkLostAnnounced;
+    ptApp.linkOk            = true;
     ptApp.linkLostAnnounced = false;
+    ptApp.linkBlinking      = false;
     ptRgbApplyState(ptApp.state);
     ptAppShowState(ptApp.state);
+    if (wasLost) Serial.println("[link] RESTORED - Python is talking again");
   }
 }
 
@@ -276,6 +309,10 @@ inline void ptAppBootStep(uint32_t now) {
       ptApp.selftestRfid   = ptApp.rfidOk;
       ptLivesSetCount(PT_MAX_LIVES);
       ptAppSetState(PT_ST_IDLE);
+      /* Announce the handover. Without this the last thing on the console is the
+       * boot banner, and a selftest that quietly stopped advancing would look
+       * identical to one that completed. */
+      Serial.println("[boot] selftest complete, entering IDLE / attract mode");
       break;
     default:
       break;
@@ -324,6 +361,7 @@ inline void ptAppBegin(void) {
   ptApp.lastHeartbeatMs  = now;
   ptApp.lastDisplayMs    = now;
   ptApp.lastRecoverMs    = now;
+  ptApp.lastStatusLogMs  = now;
   ptApp.bootStep         = 0;
   ptApp.bootStepMs       = now;
 
@@ -359,6 +397,41 @@ inline void ptAppBegin(void) {
   }
 }
 
+/* One-line status summary, printed every PT_STATUS_LOG_MS.
+ *
+ * This exists because the firmware would otherwise be silent. It prints at boot
+ * and in response to an RPC, and with no Python side polling there are no RPCs,
+ * so the console goes quiet after the first second. Silence is indistinguishable
+ * from a crash, which makes bring-up impossible to observe and invites someone to
+ * reset a board that is working perfectly.
+ *
+ * Kept to a single line so it can be watched scroll without flooding, and it
+ * carries the counters that actually diagnose something: the state, whether the
+ * reader is alive and in which sub-state, whether the link is up, and how full
+ * the ring is. */
+inline void ptAppLogStatus(uint32_t now) {
+  Serial.print("[status] state=");
+  Serial.print(ptStateName(ptApp.state));
+  Serial.print(" rfid=");
+  Serial.print(ptApp.rfidOk ? "ok" : "FAULT");
+  Serial.print("(v0x");
+  if (ptApp.rfidVersion < 0x10) Serial.print('0');
+  Serial.print(ptApp.rfidVersion, HEX);
+  Serial.print(") rfid_st=");
+  Serial.print(ptRfidStateName(ptRfidGetState()));
+  Serial.print(" link=");
+  Serial.print(ptApp.linkOk ? "up" : "DOWN");
+  Serial.print(" ring=");
+  Serial.print((unsigned)ptRingLen(&ptRing));
+  Serial.print("/");
+  Serial.print((unsigned)PT_EVENT_RING_SIZE);
+  Serial.print(" ovf=");
+  Serial.print((unsigned long)ptRing.overflows);
+  Serial.print(" up=");
+  Serial.print((unsigned long)(now / 1000));
+  Serial.println("s");
+}
+
 /* ── Loop ─────────────────────────────────────────────────────────────────
  * Called from loop(). Every step is non-blocking; the whole function returns in
  * well under a millisecond when nothing is due, which is what keeps the bridge
@@ -375,7 +448,13 @@ inline void ptAppLoop(void) {
   /* 1. Link supervision. Checked first so a dead link overrides everything else
    *    rather than being noticed after a round of normal work. */
   if ((uint32_t)(now - ptApp.lastRpcMs) >= PT_LINK_LOSS_MS) {
-    ptAppEnterLinkLost();
+    ptAppEnterLinkLost(now);
+  }
+  /* End the fault blink after its bounded announcement, so the console returns to
+   * attract mode and stays testable while the link is still down. */
+  if (ptApp.linkBlinking &&
+      (uint32_t)(now - ptApp.linkLostSinceMs) >= PT_LINK_LOST_BLINK_MS) {
+    ptAppEndLinkBlink();
   }
 
   /* 2. Boot sequence, before any game logic. Nothing else should act until the
@@ -410,6 +489,7 @@ inline void ptAppLoop(void) {
 
   if (ev & PT_RFID_EV_REMOVED) {
     ptRingPushCardRemoved(&ptRing, now);
+    Serial.println("[rfid] card removed");
   }
 
   if (ev & PT_RFID_EV_TAP) {
@@ -417,6 +497,19 @@ inline void ptAppLoop(void) {
      * refused. Losing a tap silently is the worst failure this firmware can
      * have, because from the outside it is indistinguishable from a dead reader. */
     ptRingPushCardTap(&ptRing, now, ptRfidGetUidHex(), ptRfidGetUidLen());
+
+    /* Log it. This is the single most useful line in the whole firmware during
+     * bring-up: it proves the reader, the state machine and the ring all work,
+     * with no Python side required to observe any of it. */
+    Serial.print("[rfid] CARD TAP uid=");
+    Serial.print(ptRfidGetUidHex());
+    Serial.print(" len=");
+    Serial.print((unsigned)ptRfidGetUidLen());
+    Serial.print(" sak=0x");
+    Serial.print(ptRfidGetSak(), HEX);
+    Serial.print(" seq=");
+    Serial.print((unsigned long)ptRing.newestSeq);
+    Serial.println(ptStateAcceptsTap(ptApp.state) ? "  accepted" : "  REFUSED (busy)");
 
     if (ptStateAcceptsTap(ptApp.state)) {
       ptAppSetState(PT_ST_TAPPED);
@@ -448,7 +541,13 @@ inline void ptAppLoop(void) {
     ptRingPushHeartbeat(&ptRing, now);
   }
 
-  /* 7. Output engines, last, so they render the state this iteration settled on
+  /* 7. Periodic status line, so the console is never silent for long. */
+  if ((uint32_t)(now - ptApp.lastStatusLogMs) >= PT_STATUS_LOG_MS) {
+    ptApp.lastStatusLogMs = now;
+    ptAppLogStatus(now);
+  }
+
+  /* 8. Output engines, last, so they render the state this iteration settled on
    *    rather than the one it started with. */
   ptMatrixTick(now);
   ptBuzzTick();
