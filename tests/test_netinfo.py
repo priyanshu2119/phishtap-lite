@@ -15,6 +15,18 @@ import pytest
 from phishtap import netinfo
 
 
+@pytest.fixture(autouse=True)
+def _clean_env(monkeypatch):
+    """Clear PT_BASE_URL for every test in this module.
+
+    Without this, a developer who happens to have PT_BASE_URL exported sees the
+    substitution tests fail with the override's value and no clue why, because
+    the override short-circuits before any of the logic under test runs. Tests
+    that want an override set it explicitly.
+    """
+    monkeypatch.delenv("PT_BASE_URL", raising=False)
+
+
 # ── is_phone_reachable ────────────────────────────────────────────────────
 
 @pytest.mark.parametrize("url", [
@@ -119,3 +131,110 @@ def test_lan_ip_does_not_return_a_loopback_address():
     ip = netinfo.lan_ip()
     if ip is not None:
         assert not ip.startswith("127.")
+
+
+# ── Container-internal detection ──────────────────────────────────────────
+#
+# This is the more dangerous failure. A wildcard host is obviously wrong and
+# someone notices. A Docker bridge address looks exactly like a real LAN
+# address, gets encoded into the QR code, and produces phones that silently time
+# out with nothing in any log to explain why.
+
+@pytest.mark.parametrize("ip", ["172.17.0.2", "172.17.15.9", "169.254.3.4"])
+def test_docker_bridge_and_link_local_are_flagged(ip):
+    assert netinfo.is_container_internal(ip) is True
+
+
+@pytest.mark.parametrize("ip", [
+    "192.168.1.50",     # typical home router
+    "192.168.43.17",    # Android hotspot
+    "172.20.10.3",      # iPhone hotspot - legitimately in 172.16/12
+    "10.0.0.9",         # typical college network
+])
+def test_real_lan_and_hotspot_addresses_are_not_flagged(ip):
+    """172.16.0.0/12 must NOT be flagged wholesale. iPhone hotspots hand out
+    172.20.10.x, and a laptop hotspot is the recommended default demo network
+    (docs/ARCHITECTURE.md R14), so flagging the whole range would cry wolf on
+    exactly the setup the demo depends on."""
+    assert netinfo.is_container_internal(ip) is False
+
+
+def test_a_non_ip_host_is_not_container_internal():
+    """A hostname like unoq.local cannot be parsed as an address and must not be
+    treated as container-internal."""
+    assert netinfo.is_container_internal("unoq.local") is False
+    assert netinfo.is_container_internal("nonsense") is False
+
+
+def test_a_container_internal_substitution_warns_at_error_level(monkeypatch, caplog):
+    """Verified on this board: a bare `docker run` of the app image reports
+    172.17.0.2. Substituting that silently would produce a QR code no phone can
+    open, so it must be loud and must name the fix."""
+    monkeypatch.delenv("PT_BASE_URL", raising=False)
+    monkeypatch.setattr(netinfo, "lan_ip", lambda: "172.17.0.2")
+    url, warning = netinfo.resolve_base_url("http://0.0.0.0:7000")
+
+    assert url == "http://172.17.0.2:7000"
+    assert warning is not None
+    assert "CONTAINER-INTERNAL" in warning
+    assert "PT_BASE_URL" in warning, "the warning must name the fix"
+    assert any(r.levelname == "ERROR" for r in caplog.records), (
+        "a container-internal address must be an error, not a warning: the app "
+        "still starts and still serves the kiosk, so nothing else will complain"
+    )
+
+
+def test_a_normal_lan_substitution_is_only_a_warning(monkeypatch, caplog):
+    """Not every substitution is a crisis. A real LAN address is the expected
+    fallback and should not be reported at error level, or the operator learns to
+    ignore the one that matters."""
+    monkeypatch.delenv("PT_BASE_URL", raising=False)
+    monkeypatch.setattr(netinfo, "lan_ip", lambda: "192.168.1.50")
+    url, warning = netinfo.resolve_base_url("http://0.0.0.0:7000")
+
+    assert url == "http://192.168.1.50:7000"
+    assert warning is not None
+    assert "CONTAINER-INTERNAL" not in warning
+    assert not any(r.levelname == "ERROR" for r in caplog.records)
+
+
+# ── Explicit override ─────────────────────────────────────────────────────
+
+def test_pt_base_url_overrides_everything(monkeypatch):
+    """At a demo the operator can see the address on the laptop and the code
+    cannot. An explicit override is the reliable escape hatch when detection
+    picks the wrong interface."""
+    monkeypatch.setenv("PT_BASE_URL", "http://192.168.1.99:7000")
+    # Even a perfectly good brick URL must yield to the override.
+    url, warning = netinfo.resolve_base_url("http://10.0.0.1:7000")
+    assert url == "http://192.168.1.99:7000"
+    assert warning is None, "an explicit override is not a problem to warn about"
+
+
+def test_pt_base_url_overrides_a_container_internal_detection(monkeypatch, caplog):
+    """The override exists precisely for the case where detection is wrong, so it
+    must win without also emitting the container-internal error."""
+    monkeypatch.setenv("PT_BASE_URL", "http://192.168.43.17:7000")
+    monkeypatch.setattr(netinfo, "lan_ip", lambda: "172.17.0.2")
+    url, warning = netinfo.resolve_base_url("http://0.0.0.0:7000")
+    assert url == "http://192.168.43.17:7000"
+    assert warning is None
+    assert not any(r.levelname == "ERROR" for r in caplog.records)
+
+
+def test_a_blank_pt_base_url_is_ignored(monkeypatch):
+    """An empty environment variable is how an unset one often arrives, and
+    treating it as an override would produce a base URL of ''."""
+    monkeypatch.setenv("PT_BASE_URL", "   ")
+    monkeypatch.setattr(netinfo, "lan_ip", lambda: "192.168.1.50")
+    url, _ = netinfo.resolve_base_url("http://0.0.0.0:7000")
+    assert url == "http://192.168.1.50:7000"
+
+
+def test_a_valid_brick_url_needs_no_override(monkeypatch):
+    """The normal path: App Lab sets HOST_IP, the brick reports a real address,
+    and nothing is substituted or logged."""
+    monkeypatch.delenv("PT_BASE_URL", raising=False)
+    url, warning = netinfo.resolve_base_url("http://192.168.1.50:7000")
+    assert url == "http://192.168.1.50:7000"
+    assert warning is None
