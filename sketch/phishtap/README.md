@@ -1,0 +1,282 @@
+# PhishTap Lite — production firmware (Stage 1b)
+
+The MCU-side firmware for the PhishTap Lite console. It drives the RC522 reader,
+the 8x13 LED matrix, three lives LEDs, the onboard RGB status LEDs and the buzzer,
+and exposes the console to Python over the internal bridge.
+
+It contains **no game logic**. The MCU reports what the hardware did and renders
+what Python tells it to. Scoring, sessions, rounds and the corpus all live on the
+Python side (Stage 2).
+
+---
+
+## Status
+
+| | |
+|---|---|
+| Compiles with the real Zephyr toolchain | **yes**, verified on the board |
+| Flash | 125,112 bytes (15% of 786,432) |
+| RAM (globals) | 54,412 bytes (20% of 262,144), 207,732 left for locals |
+| Host unit tests | 95 (JSON) + 232 (event ring), clean under ASan and UBSan |
+| Run on hardware | **not yet** — needs a Run in App Lab |
+
+---
+
+## Deploy and run
+
+The board must be attached over USB-C and visible to `adb`.
+
+```bash
+cd /home/any/Desktop/kio/phishtap-lite
+
+# compile with the real toolchain, no flashing, safe to repeat
+ADB=~/Android/Sdk/platform-tools/adb tools/board_compile.sh --sketch phishtap
+
+# gates + push to the board
+ADB=~/Android/Sdk/platform-tools/adb tools/deploy_to_board.sh --sketch phishtap
+```
+
+Then, in the browser:
+
+1. Open **App Lab** and select the `phishtap` app.
+2. Open the **Serial Monitor** tab *first*. The Python and App Launch tabs show
+   the Linux side and will look silent.
+3. Press **Run**.
+
+Unlike `hw_selftest`, this firmware does not exit. It runs forever, so there is no
+`--loop` flag and no need to have the monitor open before pressing Run.
+
+### What you should see
+
+```
+PhishTap Lite firmware 1b.1 (protocol v1)
+  matrix: initialised (no readback, confirm by eye)
+  rfid:   ok, version 0x82
+          (undocumented version: counterfeit die, expected and not a fault)
+bridge: bound pt.get_status  ok
+bridge: bound pt.get_events  ok
+...
+bridge: all 10 handlers registered with provide_safe
+```
+
+Then the boot selftest runs for about 1.2 s — the whole panel lights, all three
+lives LEDs come on, LED3 goes white, one welcome beep — and the console settles
+into attract mode, scrolling `PHISHTAP TAP CARD` with LED3 green.
+
+Tapping a card should:
+
+- play the welcome rhythm
+- scroll `SCAN QR CODE`
+- turn LED3 blue and start LED4 pulsing
+- print `[rpc] ...` lines once Python starts polling
+
+---
+
+## Wiring
+
+Only the RC522 is needed for Stage 1b.
+
+| RC522 | UNO Q |
+|---|---|
+| VCC | **3V3** — never 5 V, the chip is a 3.3 V part |
+| GND | GND |
+| RST | D5 |
+| SDA / SS | D10 |
+| SCK | D13 |
+| MOSI | D11 |
+| MISO | D12 |
+| IRQ, EA | not connected |
+
+The lives LEDs (D7/D8/D9), the buzzer (D6 via an NPN) and their resistors are
+wired later. Until then the firmware drives those pins harmlessly and the
+corresponding feedback is simply invisible.
+
+Use the **white MIFARE card**, not the blue keyfob. Counterfeit readers frequently
+refuse keyfobs, and clone antennas are weaker, so hold the card flat against the
+reader rather than hovering it.
+
+---
+
+## Files
+
+| File | Role |
+|---|---|
+| `phishtap.ino` | **only** `setup()` and `loop()`. See the purity rule below |
+| `pt_config.h` | every tunable constant, each with its reasoning |
+| `pt_pins.h` | the pin map, byte-identical to the hardware-proven `hw_selftest` copy |
+| `pt_json.h` | JSON writer and reader over fixed buffers. **No Arduino dependency** |
+| `pt_state.h` | the state enum, its wire names, and which states Python may set |
+| `pt_events.h` | the 16-slot event ring and its serialisation. **No Arduino dependency** |
+| `pt_font.h` | 5x7 glyphs, byte-identical to the proven copy |
+| `pt_matrix.h` | non-blocking scroller and procedural animations |
+| `pt_buzzer.h` | non-blocking rhythm engine with priority |
+| `pt_lives.h` | lives LEDs and the lost-a-life blink |
+| `pt_rgb.h` | onboard RGB status LEDs |
+| `pt_countdown.h` | the accelerating round countdown |
+| `pt_rfid.h` | the non-blocking RC522 state machine |
+| `pt_app.h` | shared state, boot sequence, the loop that drives everything |
+| `pt_bridge.h` | the ten RPC handlers |
+| `sketch.yaml` | pins MFRC522 to **1.4.12**; 1.4.11 does not compile on this core |
+
+Include order is `pt_bridge.h` → `pt_app.h` → everything else. The `.ino` includes
+only `pt_bridge.h`.
+
+### The .ino purity rule
+
+`phishtap.ino` defines **only** `setup()` and `loop()`. Not a helper, not a type,
+not a constant.
+
+arduino-cli runs ctags over the `.ino` and inserts a prototype for every function
+it finds there, above the rest of the file. A hoisted prototype for a function
+returning a type declared in a later header produces `'PtState' was not declared
+in this scope`; one for a function that already has a definition produces
+`redeclared as different kind of entity`. Both stop the build and neither is
+diagnosable from the `.ino`, because the offending code is not visible in it.
+`hw_selftest` hit exactly this. `tools/syntax_check.sh` enforces the rule.
+
+---
+
+## Threading, and why there are no locks
+
+The core's `main` is:
+
+```c
+for (;;) { loop(); __loopHook(); }
+```
+
+(`cores/arduino/main.cpp`, arduino:zephyr 1.1.0). `__loopHook` is a weak symbol
+that Arduino_RouterBridge overrides to call `safeUpdate()`, which dispatches every
+handler registered with `provide_safe`.
+
+So safe handlers run **on the loop thread, strictly between iterations of
+`loop()`, never during one**. Two consequences shape the whole design:
+
+1. **No synchronisation is needed.** Producers and consumers cannot interleave, so
+   a mutex would add only a way to deadlock. There is no `volatile` and no atomic
+   anywhere in this firmware.
+2. **A slow handler stalls everything.** While a handler runs, `loop()` is not
+   running, so the RFID poll, the countdown and every animation are frozen. Each
+   handler therefore parses one small object, mutates state and returns. All the
+   consequences of a change are worked out in `ptAppLoop`, not in the handler.
+
+Handlers registered with plain `provide()` would run on the background RPC thread
+instead, where Arduino APIs are unsafe and concurrency is real. This firmware uses
+`provide_safe` exclusively.
+
+### Handlers cannot print
+
+`Monitor`/`Serial` traffic rides the same router as the RPC itself, and printing
+from inside a response deadlocks it. So each handler records what it was asked and
+whether it succeeded, and `ptBridgePollLogs()` — called from `loop()`, where
+printing is safe — emits it as an `[rpc] ...` line.
+
+Only the most recent call survives, because at ten polls a second Python can call
+faster than the console prints. The latest call is the one worth seeing.
+
+---
+
+## RPC surface
+
+Every payload is a **single JSON string** in both directions. This works because
+MsgPack's `str_t` *is* `arduino::String` on this core (`MsgPack/Types.h`:
+`using str_t = String;` under `#ifdef ARDUINO`), so a `String fn(String)` handler
+binds natively.
+
+**Python must therefore send `json.dumps({...})`, not a bare dict.**
+
+| Method | Request | Response |
+|---|---|---|
+| `pt.get_status` | `{}` | `{proto, fw, state, uptime_ms, rfid_ok, matrix_ok, lives, round, score, queue_len, overflows, link_ok, rfid_version, rfid_version_documented, rfid_state}` |
+| `pt.get_events` | `{since}` | `{events:[{seq,t_ms,type,data}], oldest_seq, overflow}` |
+| `pt.ack_events` | `{seq}` | `{ok}` |
+| `pt.set_state` | `{state}` | `{ok}` or `{ok:false, err}` |
+| `pt.start_round` | `{round, limit_ms}` | `{ok}` or `{ok:false, err}` |
+| `pt.end_round` | `{result}` | `{ok}` — result is `correct`, `wrong` or `timeout` |
+| `pt.set_lives` | `{n}` | `{ok}` |
+| `pt.show_score` | `{score}` | `{ok}` |
+| `pt.buzz` | `{pattern}` | `{ok}` |
+| `pt.selftest` | `{}` | `{leds, buzzer, matrix, rgb, rfid, details}` |
+
+Event types: `card_tap`, `card_removed`, `round_timeout`, `button`, `hw_fault`,
+`heartbeat`.
+
+### Two honest caveats
+
+**`matrix_ok` is not a test.** `Arduino_LED_Matrix::begin()` is
+`int begin() { matrixBegin(); return 1; }` — it returns 1 unconditionally, and an
+LED matrix has no readback of any kind. Software cannot tell whether any light
+came out. The field records that initialisation ran; `pt.selftest` additionally
+reports `matrix_has_readback: false`. Confirm the panel by eye.
+
+**`rfid_ok` tolerates counterfeit dies.** Only version `0x00` and `0xFF` mean
+"nothing is answering". Every other value, however undocumented, is treated as a
+working reader. The module on this bench reports `0x82`, a counterfeit die, and it
+reads cards perfectly. Treating an unknown version as a fault is the mistake that
+produced four false failures during bring-up. See `docs/HARDWARE.md`.
+
+### States
+
+`boot`, `selftest`, `idle`, `tapped`, `playing`, `over`, `busy`, `error`.
+
+`boot` and `selftest` extend the list in `docs/ARCHITECTURE.md` §4, deliberately.
+Collapsing startup into `idle` would make a boot that hangs inside the selftest
+indistinguishable from a healthy idle console, which is exactly the failure worth
+seeing. **Python must treat an unrecognised state as "not ready" rather than
+crashing.**
+
+Python may set `idle`, `tapped`, `playing`, `over`, `busy`, `error`. It may not set
+`boot` or `selftest`; those describe the MCU's own startup and there is no way to
+re-enter them short of a reset.
+
+---
+
+## Verification
+
+Four gates, in increasing strength:
+
+```bash
+tools/syntax_check.sh      # host compile against stubs, -Wall -Wextra, .ino purity
+tools/no_write_check.sh    # read-only card policy: no mutating MFRC522 API
+tools/host_gate.sh         # 327 assertions on pt_json.h and pt_events.h, ASan+UBSan
+tools/board_compile.sh     # the REAL Zephyr toolchain on the board
+```
+
+`tools/host_gate.sh` is the interesting one. `pt_json.h` and `pt_events.h` have no
+Arduino dependency, so the **actual production code** runs under g++ with
+assertions. It also pipes a payload written by the firmware's own writer through
+Python's `json` module — an independent RFC 8259 parser that shares no code with
+the writer. A codec that only ever validates itself proves nothing.
+
+### What none of the gates prove
+
+That it *behaves* correctly. Compiling says nothing about whether the reader
+reads, the bridge binds at runtime, or the state machine advances. For that, press
+Run and watch.
+
+---
+
+## Troubleshooting
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| `bridge: Bridge.begin() FAILED` | the `arduino-router` service is down | `adb shell systemctl status arduino-router` |
+| `bridge: bound pt.X FAILED` | the router already has that name bound, usually from a previous run | restart the app; the router releases bindings on process exit |
+| No `[rpc]` lines at all | Python is not polling, or is calling the wrong method names | check the Stage 2 adapter; method names are `pt.` prefixed |
+| `state` stuck at `selftest` | the boot sequence did not complete | check the Serial output for the step log |
+| `state` flips to `idle` with a blinking panel and LED3 dark | link lost — no RPC for 15 s | the Python side stopped polling |
+| Card tap does nothing | reader fault, or the card is a blue keyfob | check `rfid_state` in `pt.get_status`; use the white MIFARE card |
+| `rfid_ok: false`, `rfid_version: 0x00` | MISO held low | run `tools/run_phase.sh diag` on `hw_selftest` to isolate |
+| Same card triggers twice | cooldown is 3 s; a second tap after that is correct behaviour | raise `PT_CARD_COOLDOWN_MS` in `pt_config.h` |
+| MFRC522 "incompatible architecture" warning | `library.properties` omits `zephyr` | **harmless**, documented in `sketch.yaml` |
+
+---
+
+## Not implemented yet
+
+Deferred to later stages, all of them documented in `docs/ARCHITECTURE.md` §12:
+
+- Physical PHISH/SAFE buttons on D2 and D4 (Stage 6). The `button` event type and
+  `ptRingPushButton` already exist; nothing calls them.
+- Anything driven by Python: sessions, QR, scoring, the phone game (Stages 2-3).
+  Until Stage 2 exists there is nothing to poll the bridge, so the console will
+  sit in attract mode and report link-lost after 15 s. **That is expected.**

@@ -40,39 +40,59 @@ server. Neither reaches into the other's job.
 ```
 docs/                  architecture and verified hardware notes
 sketch/hw_selftest/    bring-up diagnostic for the board and peripherals
-tools/                 verification gates and deploy scripts
+sketch/phishtap/       production firmware (Stage 1b)
+tools/                 verification gates, host unit tests and deploy scripts
 ```
 
-Later stages add `python/`, `assets/`, `tests/` and the production sketch. The
-planned tree is in ## Start here
+Later stages add `python/`, `assets/` and `tests/`. The planned tree is in
+## Start here
 
 Read `docs/HARDWARE.md` before wiring anything. It has the pin map, the resistor
-maths, the transistor pinout trap, and the two library version pins that are easy
-to get wrong.
+maths, the transistor pinout trap, the two library version pins that are easy to
+get wrong, and the counterfeit-module analysis that explains why a reader
+reporting version `0x82` is fine.
 
 Then `sketch/hw_selftest/README.md` for the bring-up procedure. It runs in phases
 so a failure points at one thing rather than everything.
 
+For the firmware itself, `sketch/phishtap/README.md`.
+
 ## Verification
 
-Three gates run before anything reaches the board:
+Five gates, in increasing strength:
 
 ```bash
-tools/syntax_check.sh      # g++ -fsyntax-only against stub headers, plus the .ino purity rule
+tools/syntax_check.sh      # g++ against stub headers, -Wall -Wextra, .ino purity rule
 tools/no_write_check.sh    # no card-mutating MFRC522 call anywhere in first-party code
+tools/host_gate.sh         # 327 assertions on the Arduino-free modules, ASan + UBSan
 tools/check_lib.sh MFRC522 1.4.12   # does the pinned library itself compile
+tools/board_compile.sh --sketch phishtap   # the REAL Zephyr toolchain, on the board
 ```
+
+`host_gate.sh` is worth understanding. `pt_json.h` and `pt_events.h` are written
+with no Arduino dependency, so the actual production code runs under g++ with
+assertions before it is ever flashed. It also pipes a payload written by the
+firmware's own writer through Python's `json` module, an independent RFC 8259
+parser. A codec that only ever validates itself proves nothing.
+
+`board_compile.sh` closes the other gap: `syntax_check.sh` compiles against
+hand-written stubs, which are only as good as whoever wrote them, so this compiles
+against the real core and the real libraries. It does not flash or run anything.
 
 And two for working with the board:
 
 ```bash
-tools/deploy_to_board.sh --phases=A,B   # push over adb, gates run first
-tools/board_doctor.sh                   # what is actually on the board right now
+tools/deploy_to_board.sh --sketch phishtap  # push over adb, all gates run first
+tools/run_phase.sh diag                     # RC522 investigation on hw_selftest
+tools/board_doctor.sh                       # what is actually on the board right now
 ```
 
 ## Status
 
-Stage 1a is done: the hardware selftest covers the matrix, RGB LEDs, RC522, lives
-LEDs and buzzer, and Phase A passes on real hardware. Phase B is in progress.
+**Stage 1a is done.** The hardware selftest covers the matrix, RGB LEDs, RC522,
+lives LEDs and buzzer. Phases A, L, W and B all pass on real hardware: the reader
+returned UID `C7 DA 41 04`, SAK `0x08` (MIFARE 1K), five identical reads, and
+detected removal.
 
-Stage 1b onwards is not started. See the stage list at the end of
+The module is a counterfeit die reporting version `0x82`. That is normal, it reads
+cards fine, and the two warnings it produces are unavoidable on any clone. Read the

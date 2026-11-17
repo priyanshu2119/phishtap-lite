@@ -184,6 +184,30 @@ Version 1. Design rules:
 - **Every MCU handler is registered with `provide_safe`**, which runs in the
   `loop()` context. `provide()` runs on a background RPC thread where Arduino APIs
   are unsafe.
+
+  **Verified, not assumed.** The core's `main` (cores/arduino/main.cpp,
+  arduino:zephyr 1.1.0) is:
+
+  ```c
+  for (;;) { loop(); __loopHook(); }
+  ```
+
+  `__loopHook` is a weak symbol that Arduino_RouterBridge overrides to call
+  `safeUpdate()`, which dispatches every `provide_safe` handler. So safe handlers
+  run on the **same thread as `loop()`, strictly between iterations, never during
+  one**. Two consequences the firmware relies on:
+
+  1. No synchronisation is needed anywhere. Producers and consumers cannot
+     interleave, so a mutex would add only a way to deadlock. There is no
+     `volatile` and no atomic in the production sketch.
+  2. A slow handler stalls `loop()`, and with it the RFID poll, the countdown and
+     every animation. Handlers therefore parse one small object, mutate state and
+     return; all consequences are worked out in the loop.
+
+- **Payloads are single JSON strings**, which binds natively because MsgPack's
+  `str_t` *is* `arduino::String` on this core (`MsgPack/Types.h`:
+  `using str_t = String;` under `#ifdef ARDUINO`). A `String fn(String)` handler
+  needs no composite type mapping. Python must send `json.dumps(...)`, not a dict.
 - MCU handlers never call `Bridge.call()` or print. The manual warns explicitly
   that starting a new communication while responding to one deadlocks.
 - The MCU never blocks on Python. Events go into a static ring buffer and Python
@@ -194,7 +218,7 @@ Version 1. Design rules:
 
 | Method | Request | Response |
 |---|---|---|
-| `pt.get_status` | `{}` | `{proto, fw, state, uptime_ms, rfid_ok, matrix_ok, lives, round, queue_len, overflows}` |
+| `pt.get_status` | `{}` | `{proto, fw, state, uptime_ms, rfid_ok, matrix_ok, lives, round, score, queue_len, overflows, link_ok, rfid_version, rfid_version_documented, rfid_state}` |
 | `pt.get_events` | `{since: seq}` | `{events: [{seq, t_ms, type, data}], oldest_seq, overflow}` |
 | `pt.ack_events` | `{seq}` | `{ok}` |
 | `pt.set_state` | `{state}` | `{ok}` |
@@ -205,8 +229,29 @@ Version 1. Design rules:
 | `pt.buzz` | `{pattern}` | `{ok}` |
 | `pt.selftest` | `{}` | `{leds, buzzer, matrix, rgb, rfid, details}` |
 
-States: `idle`, `tapped`, `playing`, `over`, `busy`, `error`.
+States: `boot`, `selftest`, `idle`, `tapped`, `playing`, `over`, `busy`, `error`.
 Buzz patterns: `welcome`, `join`, `ok`, `wrong`, `tick`, `busy`, `over`, `error`.
+
+`boot` and `selftest` were added during Stage 1b. Collapsing startup into `idle`
+would make a boot that hangs inside the selftest indistinguishable from a healthy
+idle console, which is precisely the failure worth seeing. **Python must treat an
+unrecognised state as "not ready" rather than crashing.** Python may set `idle`,
+`tapped`, `playing`, `over`, `busy` and `error`; `boot` and `selftest` describe the
+MCU's own startup and are not settable.
+
+### Two fields that do not mean what they look like they mean
+
+**`matrix_ok` is not a test.** `Arduino_LED_Matrix::begin()` is
+`int begin() { matrixBegin(); return 1; }` — it returns 1 unconditionally, and an
+LED matrix has no readback of any kind, so software cannot tell whether any light
+came out. The field records that initialisation ran. `pt.selftest` also reports
+`matrix_has_readback: false`. Confirm the panel by eye.
+
+**`rfid_ok` tolerates counterfeit dies.** Only version `0x00` and `0xFF` mean
+"nothing is answering". Every other value, however undocumented, is a working
+reader. The module on this bench reports `0x82`, a counterfeit die, and reads cards
+perfectly. Treating an unknown version as a fault produced four false failures
+during bring-up; see `HARDWARE.md`.
 
 ### MCU -> Python (queued, delivered via `pt.get_events`)
 
@@ -495,7 +540,7 @@ phishtap-lite/
     HARDWARE.md             verified BOM, power and network notes
   sketch/
     hw_selftest/            bring-up diagnostic, Stage 1a
-    (production sketch)     Stage 1b
+    phishtap/               production firmware, Stage 1b
   python/
     main.py                 thin adapter only
     requirements.txt
@@ -524,11 +569,11 @@ phishtap-lite/
 
 | # | Risk | Mitigation |
 |---|---|---|
-| R1 | MFRC522 on the Zephyr core is unproven | the selftest's Phase B runs first, before anything else |
-| R2 | matrix and RC522 might share a bus | Phase A and B both run, so a conflict shows up immediately |
+| R1 | MFRC522 on the Zephyr core is unproven | **RESOLVED.** Phase B read UID `C7 DA 41 04`, SAK 0x08, 5/5 identical, removal detected. The module is a counterfeit die (version `0x82`) and works fine |
+| R2 | matrix and RC522 might share a bus | **RESOLVED.** Phase A and Phase B both pass in the same run, so there is no conflict |
 | R3 | 3V3 rail budget under RF burst plus LEDs | measure during the selftest, stagger LED and RF activity |
 | R4 | Socket.IO client and server version mismatch | pin the vendored client after checking the board |
-| R5 | bridge deadlock from a nested call | all handlers use `provide_safe`, none call back into the bridge |
+| R5 | bridge deadlock from a nested call | **RESOLVED structurally.** `provide_safe` handlers run on the loop thread between iterations, never concurrently, and none call back into the bridge or print |
 | R6 | corpus answer leak | server-side only, plus a test asserting nothing under `assets/` |
 | R7 | `data/` excluded from app exports | admin CSV export as backup, documented `scp` recovery |
 | R8 | no RTC | monotonic deltas everywhere, admin-settable offset |
@@ -547,7 +592,11 @@ phishtap-lite/
 - **Stage 1a** — `hw_selftest` sketch covering bring-up phases A, B, C1, C2, C3,
   plus the no-write policy checker. Done.
 - **Stage 1b** — production sketch: RC522 state machine, matrix/LED/buzzer
-  engines, bridge handlers, event queue, heartbeat, link-loss safety.
+  engines, bridge handlers, event queue, heartbeat, link-loss safety. **Written
+  and compiling clean with the real Zephyr toolchain on the board** (125 KB flash,
+  54 KB RAM). `pt_json.h` and `pt_events.h` are Arduino-free and carry 327 host
+  assertions under ASan/UBSan, plus independent validation of the emitted JSON by
+  Python's parser. Not yet run on hardware. See `sketch/phishtap/README.md`.
 - **Stage 2** — Python backend: engine, scoring, sessions, SQLite, analytics,
   identity modes, bridge adapter, web_ui adapter, mock bridge, laptop dev server,
   pytest.
