@@ -592,11 +592,15 @@ phishtap-lite/
 - **Stage 1a** — `hw_selftest` sketch covering bring-up phases A, B, C1, C2, C3,
   plus the no-write policy checker. Done.
 - **Stage 1b** — production sketch: RC522 state machine, matrix/LED/buzzer
-  engines, bridge handlers, event queue, heartbeat, link-loss safety. **Written
-  and compiling clean with the real Zephyr toolchain on the board** (125 KB flash,
-  54 KB RAM). `pt_json.h` and `pt_events.h` are Arduino-free and carry 327 host
-  assertions under ASan/UBSan, plus independent validation of the emitted JSON by
-  Python's parser. Not yet run on hardware. See `sketch/phishtap/README.md`.
+  engines, bridge handlers, event queue, heartbeat, link-loss safety. **Done and
+  verified on hardware.** Compiles clean with the real Zephyr toolchain (128 KB
+  flash, 55 KB RAM). `pt_json.h` and `pt_events.h` are Arduino-free and carry 327
+  host assertions under ASan/UBSan, plus independent validation of the emitted
+  JSON by Python's parser. On the board it reads UIDs reliably, holds
+  `present_watch` without re-triggering while a card is held, detects removal only
+  on actual removal, and walks `seek -> present_watch -> cooldown -> seek`.
+  The RPC handlers are not yet exercised at runtime, which needs Stage 2.
+  See `sketch/phishtap/README.md`.
 - **Stage 2** — Python backend: engine, scoring, sessions, SQLite, analytics,
   identity modes, bridge adapter, web_ui adapter, mock bridge, laptop dev server,
   pytest.

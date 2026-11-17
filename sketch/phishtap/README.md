@@ -15,10 +15,32 @@ Python side (Stage 2).
 | | |
 |---|---|
 | Compiles with the real Zephyr toolchain | **yes**, verified on the board |
-| Flash | 125,112 bytes (15% of 786,432) |
-| RAM (globals) | 54,412 bytes (20% of 262,144), 207,732 left for locals |
+| Flash | 128,280 bytes (16% of 786,432) |
+| RAM (globals) | 55,560 bytes (21% of 262,144), 206,584 left for locals |
 | Host unit tests | 95 (JSON) + 232 (event ring), clean under ASan and UBSan |
-| Run on hardware | **not yet** — needs a Run in App Lab |
+| **Run on hardware** | **yes — verified 2026-11-18** |
+
+### What the hardware run proved
+
+Observed directly from the serial console, with a counterfeit module reporting
+version `0x82`:
+
+- Reader initialises and reports the correct version (`rfid=ok(v0x82)`)
+- Card taps read `uid=C7DA4104 len=4 sak=0x8`, repeatedly and consistently
+- **Holding a card on the reader does not re-trigger.** The state sits in
+  `present_watch` and no duplicate tap is queued, which confirms the
+  ACTIVE-state reasoning behind `PICC_IsNewCardPresent()` is correct
+- Removal is detected **only on actual removal**, not while the card is held,
+  which confirms the WUPA-then-HaltA probe restores the state it expects
+- The state machine walks `seek -> present_watch -> cooldown -> seek` correctly
+- The event ring fills to `16/16` and the overflow counter climbs, exactly as
+  designed when nothing drains it
+- Link-loss fires at 15 s, blinks for 6 s, then returns to attract mode
+- A tap with the link down shows `NL`, stays in `idle`, and remains testable
+
+What is **not** yet proven, because nothing exercises it: the ten RPC handlers at
+runtime, the countdown, and the matrix/buzzer/LED engines beyond the boot
+selftest. Those need the Stage 2 Python side.
 
 ---
 

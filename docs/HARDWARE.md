@@ -618,6 +618,37 @@ The no-argument `PCD_Init()` does honour the chip select and reset pins given to
 the constructor, so `MFRC522 rfid(SS_PIN, RST_PIN); rfid.PCD_Init();` is correct.
 Only the one-argument `PCD_Init(rstPin)` overload hardcodes `SS`.
 
+### The module is not ready immediately at cold boot
+
+**Measured on this board, 2026-11-18.** The production firmware called
+`PCD_Init()` almost immediately after reset and read `VersionReg` as `0x00` — the
+value that means nothing is answering on the bus. Seconds later the same module,
+with no wiring change, read `0x82` and then read card UIDs perfectly.
+
+The reader was never broken. It was simply not ready that early.
+
+`hw_selftest` never showed this, and the reason is instructive: it runs an 8 second
+startup countdown plus several phases of raw SPI probing before it ever calls
+`PCD_Init()`, so by then the module has long since settled. A diagnostic that
+happens to be slow hides a timing requirement that production code will hit.
+
+**Consequence: initialisation must retry.** `ptRfidBegin()` wraps a single attempt
+in a loop of five, 50 ms apart, each performing a full hardware reset rather than
+re-reading the same settled state. Every attempt logs its version byte, because a
+reader that failed and then worked is exactly the intermittent behaviour nobody
+can diagnose later from one line saying it succeeded.
+
+The 60 ms wait after driving RST high covers the datasheet's oscillator start-up
+time (crystal start-up plus 37.74 µs) with margin, but that is the *chip's*
+start-up. The module's own regulator and the board's 3V3 rail coming up from cold
+are separate, and evidently slower.
+
+A related trap: any cached copy of hardware state must be refreshed whenever the
+hardware is re-read. The first version of the recovery path set `rfid_ok = true`
+but left the cached version byte at the `0x00` from the failed attempt, which
+produced the self-contradictory status line `rfid=ok(v0x00)` and reported a value
+that had been untrue for minutes.
+
 ### Card protocol notes
 
 `STATUS_OK` is the first enumerator, so it equals 0. That makes
@@ -634,6 +665,24 @@ immediately afterwards.
 After `PICC_HaltA()` the card sits in HALT state and stops answering REQA, so
 `PICC_IsNewCardPresent()` reports absent while the card is still lying on the
 reader. Removal detection has to probe with `PICC_WakeupA()` instead.
+
+**Verified on hardware, 2026-11-18.** The production firmware's probe loop is
+WUPA followed by `PICC_HaltA()` on success, and it behaves exactly as the state
+machine predicts:
+
+- A card **held** on the reader produces one tap event and then sits in
+  `present_watch` indefinitely with no duplicates. This confirms that
+  `PICC_IsNewCardPresent()` is not detecting a *new* card at all — reading
+  `MFRC522.cpp:1925` shows it sends REQA and never calls `HaltA()`, so what it
+  actually detects is a card that is not currently in the ACTIVE state. After
+  `PICC_ReadCardSerial()` the card is ACTIVE and answers neither REQA nor WUPA,
+  which is what stops the same card re-triggering.
+- Removal is reported **only when the card is actually taken away**, never while
+  it is held.
+- The `HaltA()` after a successful WUPA is load-bearing, not tidy-up. Without it
+  the card would be left in READY rather than HALT, so the next probe would be
+  testing a different state than the previous one and detection would work once
+  and then stop working.
 
 `GetStatusCodeName()` and `PICC_GetTypeName()` return
 `const __FlashStringHelper *`, an AVR PROGMEM abstraction. Streaming that through
