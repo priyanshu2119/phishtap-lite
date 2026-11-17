@@ -131,6 +131,17 @@ class GameEngine:
     # ── Link health ───────────────────────────────────────────────────────
 
     @property
+    def store(self) -> SessionStore:
+        """The session store.
+
+        Exposed publicly because the API layer needs PIN and token lookups that
+        are the store's job, not the engine's. Reaching into ``engine._store``
+        from api.py would work but would make the dependency invisible and break
+        the moment the attribute was renamed.
+        """
+        return self._store
+
+    @property
     def link_ok(self) -> bool:
         with self._lock:
             return self._link_ok
@@ -300,10 +311,14 @@ class GameEngine:
     def _on_timeout(self, data: dict[str, Any]) -> None:
         """The MCU's countdown hit zero before an answer arrived.
 
-        The server also grades timeouts from its own deadline, so this can arrive
-        for a round the server has already closed. Ignoring a timeout for a round
-        that is no longer awaiting an answer is what stops a race between the two
-        clocks from costing the player two lives for one slow answer.
+        Both the MCU and the server time the round independently, so a timeout can
+        arrive for a round the server has already graded. Checking the state alone
+        is NOT sufficient, and getting this wrong is expensive: after grading, the
+        state is AWAITING_ANSWER again for the NEXT round, so a stale timeout for
+        round N would be applied to round N+1 and cost the player a second life for
+        one slow answer. The round number has to match too.
+
+        This was found by a test, not by a student losing a life during a demo.
         """
         with self._lock:
             session = self._store.active
@@ -315,6 +330,15 @@ class GameEngine:
                     data.get("round"), session.state.value,
                 )
                 return
+
+            mcu_round = data.get("round")
+            if isinstance(mcu_round, int) and mcu_round != session.round_index:
+                logger.debug(
+                    "ignoring stale MCU timeout for round %d, server is on round %d",
+                    mcu_round, session.round_index,
+                )
+                return
+
         self._grade(session_token=None, answer=None, source="timeout")
 
     # ── Phone-side flow ───────────────────────────────────────────────────

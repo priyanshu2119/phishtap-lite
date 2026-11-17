@@ -118,7 +118,13 @@ class JoinAttempts:
     it right is not part-way to a lockout.
     """
 
-    def __init__(self, threshold: int) -> None:
+    def __init__(self, threshold: int | None = None) -> None:
+        # Defaulting from config rather than requiring the argument means there is
+        # one place that decides the lockout threshold. A caller that passes one
+        # explicitly is testing a specific value, which is still supported.
+        if threshold is None:
+            from .config import JOIN_LOCKOUT_THRESHOLD
+            threshold = JOIN_LOCKOUT_THRESHOLD
         self._threshold = threshold
         self._fails: dict[str, int] = {}
         self._lock = threading.Lock()

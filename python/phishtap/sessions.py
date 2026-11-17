@@ -69,8 +69,20 @@ _ALLOWED_TRANSITIONS: dict[SessionState, frozenset[SessionState]] = {
 }
 
 
-class IllegalTransition(ValueError):
-    """Raised when a session state change is not permitted."""
+class IllegalTransition(Exception):
+    """Raised when a session state change is not permitted.
+
+    Deliberately NOT a subclass of ValueError, even though "an invalid state"
+    sounds like a bad value. It was originally, and that caused a real bug: the
+    API handlers catch ValueError to report a 400 for a bad nickname, and because
+    Python matches the first compatible except clause, an IllegalTransition was
+    caught there and reported as 400 E_NICKNAME instead of 409 E_CONSENT. A
+    client told "your nickname is invalid" when the real problem was "this round
+    is already closed" will retry the wrong thing forever.
+
+    Deriving from Exception keeps the two failure classes distinct so no ordering
+    of except clauses can confuse them.
+    """
 
 
 @dataclass
