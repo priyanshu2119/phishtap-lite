@@ -166,7 +166,17 @@ def main() -> None:
         use_tls=use_tls,
     )
     notifier = WebNotifier(ui)
-    logger.info("  web ui   : %s (tls=%s)", ui.url, use_tls)
+
+    # The brick's own url is built from HOST_IP or, failing that, the bind
+    # address. A bind address of 0.0.0.0 is not something a phone can open, and
+    # if it reached the kiosk the QR code would encode it and every scan in the
+    # room would fail while the server looked perfectly healthy. Resolve it here
+    # and log loudly if a substitution was needed.
+    from phishtap.netinfo import resolve_base_url
+    base_url, url_warning = resolve_base_url(ui.url)
+    logger.info("  web ui   : %s (tls=%s)", base_url, use_tls)
+    if url_warning:
+        logger.warning("  base url : %s", url_warning)
 
     # ── Engine and API ────────────────────────────────────────────────────
     store = SessionStore()
@@ -178,7 +188,7 @@ def main() -> None:
         join_attempts=JoinAttempts(),
         admin=admin,
         clock=clock,
-        base_url=ui.url,
+        base_url=base_url,
     )
     register_web(ui, api)
 
@@ -211,7 +221,7 @@ def main() -> None:
         time.sleep(BRIDGE_POLL_INTERVAL_S)
 
     logger.info("======== PhishTap Lite ready ========")
-    logger.info("kiosk: %s/index.html", ui.url)
+    logger.info("kiosk: %s/index.html", base_url)
 
     from arduino.app_utils import App
     App.run(user_loop=loop)

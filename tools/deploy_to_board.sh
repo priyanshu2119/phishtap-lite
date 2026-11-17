@@ -346,10 +346,64 @@ echo "deploy_to_board: ensuring the App Lab scaffold exists at $APP_ROOT"
 if [ "$DRY_RUN" -eq 0 ]; then
   "$ADB" shell "mkdir -p '$APP_ROOT/python'"
 fi
-scaffold_push "$SCAFFOLD_APP_YAML"   "$APP_ROOT/app.yaml"        "app.yaml"
+
+# app.yaml: the repository copy is AUTHORITATIVE and is always pushed.
+#
+# This differs from the other three scaffold files, and the difference is
+# deliberate. app.yaml declares the bricks and published ports, so it is
+# configuration that belongs in version control; letting a stale copy survive on
+# the board would mean the running app does not match the repository, which is
+# the kind of drift that produces "works on my board" and nothing else.
+#
+# The generated fallback below is only used when the repository has no app.yaml,
+# which is the case for the hw_selftest diagnostic app.
+if [ -f "$REPO_ROOT/app.yaml" ]; then
+  echo "    scaffold: pushing the repository's app.yaml (authoritative)"
+  run "$ADB" push "$REPO_ROOT/app.yaml" "$APP_ROOT/app.yaml"
+else
+  scaffold_push "$SCAFFOLD_APP_YAML" "$APP_ROOT/app.yaml" "app.yaml"
+fi
+
 scaffold_push "$SCAFFOLD_README"     "$APP_ROOT/README.md"       "README.md"
 scaffold_push "$SCAFFOLD_GITIGNORE"  "$APP_ROOT/.gitignore"      ".gitignore"
-scaffold_push "$SCAFFOLD_MAIN"       "$APP_ROOT/python/main.py"  "python/main.py"
+
+# python/main.py: the repository copy wins, for the same reason as app.yaml.
+#
+# This matters more than it looks. The generated placeholder is create-if-absent,
+# and an earlier deploy already put one on the board, so without this branch the
+# real entry point would never be pushed and the app would keep running the
+# do-nothing placeholder while looking like a successful deploy.
+if [ -f "$REPO_ROOT/python/main.py" ]; then
+  echo "    scaffold: pushing the repository's python/main.py (authoritative)"
+  run "$ADB" push "$REPO_ROOT/python/main.py" "$APP_ROOT/python/main.py"
+else
+  scaffold_push "$SCAFFOLD_MAIN" "$APP_ROOT/python/main.py" "python/main.py"
+fi
+
+# The real Python package, when this repo has one. main.py is a thin entry point
+# that imports the phishtap package, so pushing main.py alone would produce an
+# ImportError at startup rather than a working app.
+if [ -d "$REPO_ROOT/python/phishtap" ]; then
+  echo "    scaffold: pushing the phishtap package and corpus"
+  if [ "$DRY_RUN" -eq 0 ]; then
+    # Clear the remote package first. adb push merges rather than replaces, so a
+    # module deleted from the repository would otherwise survive on the board and
+    # keep being importable, which is a confusing way to discover a stale file.
+    "$ADB" shell "rm -rf '$APP_ROOT/python/phishtap'"
+    "$ADB" shell "mkdir -p '$APP_ROOT/python/phishtap'"
+    run "$ADB" push "$REPO_ROOT/python/phishtap/." "$APP_ROOT/python/phishtap/"
+    # __pycache__ from the laptop would be for the wrong Python version, and a
+    # mismatched .pyc is silently ignored at best and confusing at worst.
+    run "$ADB" shell "find '$APP_ROOT/python' -name '__pycache__' -type d -exec rm -rf {} + 2>/dev/null || true"
+  else
+    echo "    DRY RUN: would push python/phishtap/"
+  fi
+fi
+for extra in corpus.json requirements.txt; do
+  if [ -f "$REPO_ROOT/python/$extra" ]; then
+    run "$ADB" push "$REPO_ROOT/python/$extra" "$APP_ROOT/python/$extra"
+  fi
+done
 
 run "$ADB" push "$STAGE/$INO_NAME" "$REMOTE_DIR/sketch.ino"
 

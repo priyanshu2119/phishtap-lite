@@ -1,0 +1,48 @@
+# PhishTap Lite — App Lab application manifest.
+#
+# This file is what makes App Lab treat the folder as an app at all. Without it
+# the app does not appear in the Apps list, yet the directory still reserves the
+# name, so "Create new app" rejects it as already in use and there is no way out
+# from the browser. That cost real time to diagnose; see
+# sketch/phishtap/README.md.
+#
+# THIS FILE IS AUTHORITATIVE AND VERSION CONTROLLED. tools/deploy_to_board.sh
+# pushes it over whatever is on the board, so editing the copy on the board
+# directly will be silently overwritten. Edit it here and redeploy.
+#
+# Format verified against a real app created by
+# `arduino-app-cli app new <name> --bricks arduino:web_ui` on this board.
+
+# The user-visible name of the application. Must match the folder name under
+# /home/arduino/ArduinoApps/ and the --sketch value used when deploying.
+name: phishtap
+
+# A brief description of what the application does.
+description: "PhishTap Lite: an arcade console that trains students to spot phishing"
+
+# The icon for the application, can be an emoji or a short string.
+icon: 🎣
+
+# A list of network ports that the application exposes.
+#
+# 7000 is the WebUI brick's default bind port. Declaring it here is what makes
+# App Lab publish it, so a laptop browser (the kiosk) and a phone on the same
+# network can reach http://<board-ip>:7000. Without this the server binds inside
+# the container and nothing outside can connect.
+ports:
+  - 7000
+
+# A list of bricks used by this application.
+#
+# web_ui provides FastAPI + Uvicorn + Socket.IO and serves assets/ as static
+# files. It runs in-process inside the app container, not as a sidecar, so
+# declaring it is about provisioning and port publication rather than adding a
+# service. Verified installed on this board:
+#   arduino-app-cli brick details arduino:web_ui  ->  Status: installed
+#
+# The Python side imports it as:
+#   from arduino.app_bricks.web_ui import WebUI
+# and constructs it with use_tls (NOT use_ssl, which is a deprecated alias that
+# logs a warning).
+bricks:
+  - "arduino:web_ui"
