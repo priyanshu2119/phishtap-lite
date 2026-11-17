@@ -100,16 +100,35 @@ static struct {
 
 /* ── Low level ──────────────────────────────────────────────────────────── */
 
-/* Returns true if the panel initialised. begin() returns an int on this core, so
- * a failure is detectable and is reported as PT_FAULT_MATRIX rather than
- * silently producing a console with a dead display. */
-inline bool ptMatrixBegin(void) {
-  int rc = s_matrix.begin();
+/* Initialise the panel.
+ *
+ * RETURNS NOTHING, AND THAT IS HONEST RATHER THAN LAZY.
+ *
+ * An earlier version of this returned `begin() != 0` as a pass/fail result. That
+ * was wrong, and checking the library shows why. Arduino_LED_Matrix::begin() is:
+ *
+ *     int begin() { matrixBegin(); return 1; }
+ *
+ * It returns 1 UNCONDITIONALLY. matrixBegin() is void. So there is no failure
+ * signal to read, and a test built on the return value would have reported a
+ * healthy panel forever, including when the panel was dead.
+ *
+ * More fundamentally, an LED matrix has NO READBACK. There is no register to
+ * query and no way for software to learn whether any light came out. hw_selftest
+ * marked its matrix phase VISUAL for exactly this reason. Claiming a software
+ * verification here would be claiming something the hardware cannot provide.
+ *
+ * So: this initialises the panel, and a human confirms it by looking. The
+ * `matrix_ok` field in pt.get_status reports that initialisation ran, and
+ * pt.selftest additionally reports matrix_has_readback=false so nothing
+ * downstream mistakes it for a real test.
+ */
+inline void ptMatrixBegin(void) {
+  s_matrix.begin();
   s_matrix.setGrayscaleBits(8);
   memset(s_frame, 0, sizeof(s_frame));
   memset(&s_mx, 0, sizeof(s_mx));
   s_matrix.draw(s_frame);
-  return (rc != 0);
 }
 
 inline void ptMatrixClearBuffer(void) {

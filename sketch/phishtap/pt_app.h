@@ -69,7 +69,13 @@ typedef struct {
   /* Identity and health, reported by pt.get_status. */
   PtState  state;
   bool     rfidOk;
-  bool     matrixOk;
+  /* matrixInit records that ptMatrixBegin() ran. It is NOT a pass/fail test and
+   * can never be one: the library's begin() returns 1 unconditionally and an LED
+   * matrix has no readback, so software cannot tell whether any light came out.
+   * It is serialised as `matrix_ok` for protocol compatibility with
+   * docs/ARCHITECTURE.md §4, and pt.selftest reports matrix_has_readback=false so
+   * nothing downstream mistakes it for a real verification. */
+  bool     matrixInit;
   uint8_t  rfidVersion;
   bool     rfidVersionDocumented;
 
@@ -266,7 +272,7 @@ inline void ptAppBootStep(uint32_t now) {
       /* Finished. Hand over to IDLE, which sets the attract animation and the
        * state colour. Lives go to the game's starting count. */
       ptApp.selftestDone   = true;
-      ptApp.selftestMatrix = ptApp.matrixOk;
+      ptApp.selftestMatrix = ptApp.matrixInit;
       ptApp.selftestRfid   = ptApp.rfidOk;
       ptLivesSetCount(PT_MAX_LIVES);
       ptAppSetState(PT_ST_IDLE);
@@ -303,8 +309,9 @@ inline void ptAppBegin(void) {
   ptRgbBegin();
   ptCountdownBegin();
 
-  ptApp.matrixOk = ptMatrixBegin();
-  ptApp.rfidOk   = ptRfidBegin();
+  ptMatrixBegin();
+  ptApp.matrixInit = true;   /* initialisation ran; see the field comment */
+  ptApp.rfidOk     = ptRfidBegin();
   ptApp.rfidVersion           = ptRfidGetVersion();
   ptApp.rfidVersionDocumented = ptRfidVersionIsDocumented();
 
@@ -326,7 +333,8 @@ inline void ptAppBegin(void) {
   Serial.println("PhishTap Lite firmware " PT_FW_VERSION
                  " (protocol v" PT_STRINGIFY(PT_PROTO_VERSION) ")");
   Serial.print("  matrix: ");
-  Serial.println(ptApp.matrixOk ? "ok" : "FAILED");
+  Serial.println(ptApp.matrixInit ? "initialised (no readback, confirm by eye)"
+                                  : "FAILED");
   Serial.print("  rfid:   ");
   if (ptApp.rfidOk) {
     Serial.print("ok, version 0x");
@@ -345,9 +353,6 @@ inline void ptAppBegin(void) {
 
   if (!ptApp.rfidOk) {
     ptRingPushHwFault(&ptRing, now, PT_FAULT_RFID_INIT);
-    ptAppSetState(PT_ST_ERROR);
-  } else if (!ptApp.matrixOk) {
-    ptRingPushHwFault(&ptRing, now, PT_FAULT_MATRIX);
     ptAppSetState(PT_ST_ERROR);
   } else {
     ptAppSetState(PT_ST_SELFTEST);
@@ -465,7 +470,7 @@ inline size_t ptAppWriteStatus(char* buf, size_t cap) {
   ptJsonKVStr(&w, "state", ptStateName(ptApp.state));
   ptJsonKVUint(&w, "uptime_ms", (unsigned long)millis());
   ptJsonKVBool(&w, "rfid_ok", ptApp.rfidOk);
-  ptJsonKVBool(&w, "matrix_ok", ptApp.matrixOk);
+  ptJsonKVBool(&w, "matrix_ok", ptApp.matrixInit);
   ptJsonKVInt(&w, "lives", (long)ptApp.lives);
   ptJsonKVInt(&w, "round", (long)ptApp.round);
   ptJsonKVUint(&w, "score", (unsigned long)ptApp.score);
@@ -493,11 +498,14 @@ inline size_t ptAppWriteSelftest(char* buf, size_t cap) {
   ptJsonObjBegin(&w);
   ptJsonKVBool(&w, "leds", ptApp.selftestLeds);
   ptJsonKVBool(&w, "buzzer", ptApp.selftestBuzzer);
-  ptJsonKVBool(&w, "matrix", ptApp.selftestMatrix && ptApp.matrixOk);
+  ptJsonKVBool(&w, "matrix", ptApp.selftestMatrix && ptApp.matrixInit);
   ptJsonKVBool(&w, "rgb", ptApp.selftestRgb);
   ptJsonKVBool(&w, "rfid", ptApp.selftestRfid && ptApp.rfidOk);
   ptJsonKey(&w, "details");
   ptJsonObjBegin(&w);
+  /* Stated explicitly so nobody reads matrix:true as "the panel was tested".
+   * The panel cannot be tested by software; it has no readback. */
+  ptJsonKVBool(&w, "matrix_has_readback", false);
   ptJsonKVBool(&w, "boot_selftest_done", ptApp.selftestDone);
   ptJsonKVInt(&w, "rfid_version", (long)ptApp.rfidVersion);
   ptJsonKVBool(&w, "rfid_version_documented", ptApp.rfidVersionDocumented);
