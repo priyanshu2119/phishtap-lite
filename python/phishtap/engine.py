@@ -821,24 +821,51 @@ class GameEngine:
     # publishing a state that another thread has already changed, which is a
     # worse bug than a few milliseconds of contention.
 
+    def _current_item_payload(self, session: Session) -> dict[str, Any] | None:
+        """The live round's message, WITHOUT its answer, or None if no round is live.
+
+        Shared by the phone payload and the kiosk snapshot so the two cannot drift.
+        ``include_answer=False`` is the whole point: the kiosk is a public page on a
+        laptop screen in front of an audience, and the label, cues and explanation
+        are the teaching content that must not appear until the review screen.
+
+        Called with the lock held.
+        """
+        if session.state != SessionState.AWAITING_ANSWER:
+            return None
+        if session.round_started_mono is None:
+            return None
+        if self._pool_index >= len(self._pool):
+            return None
+        item = self._pool[self._pool_index]
+        return {
+            "round": session.round_index,
+            "limit_ms": session.round_limit_ms,
+            "deadline_mono": session.round_started_mono + session.round_limit_ms,
+            "item": item_to_payload(item, include_answer=False),
+        }
+
     def kiosk_snapshot(self) -> dict[str, Any]:
         """Everything the kiosk page needs, in one payload.
 
         Includes the MCU status so the kiosk can show a hardware-fault banner
         without a second request, and the session URL and PIN so the QR code can
         be rendered client-side.
+
+        The current message is included so the audience can follow along on the
+        big screen. It carries no answer; see _current_item_payload.
         """
         with self._lock:
             session = self._store.active
             mcu = dict(self._mcu_state)
             link_ok = self._link_ok
-            seconds = (monotonic_ms() - self._last_mcu_mono) / 1000.0
-
-        return {
-            "link_ok": link_ok and seconds < LINK_LOSS_S,
-            "seconds_since_mcu": round(seconds, 1),
-            "mcu": mcu,
-            "session": None if session is None else {
+            now = monotonic_ms()
+            seconds = (now - self._last_mcu_mono) / 1000.0
+            # Read inside the lock: the pool index moves when a round is graded,
+            # and reading it outside could pair one round's index with another's
+            # session state and show the audience the wrong message.
+            current = None if session is None else self._current_item_payload(session)
+            session_dict = None if session is None else {
                 "token": session.token,
                 "pin": session.pin,
                 "state": session.state.value,
@@ -847,7 +874,20 @@ class GameEngine:
                 "score": session.score,
                 "streak": session.streak,
                 "nickname": session.nickname,
-            },
+                "current": current,
+                # Seconds until the token stops working, from the monotonic clock.
+                # Sent as a remaining duration rather than an absolute deadline
+                # because the board has no RTC: an absolute timestamp would be
+                # wrong by however far the wall clock has drifted, and the phone's
+                # own clock is unrelated to the board's anyway.
+                "expires_in_s": max(0.0, round((session.expires_at_mono - now) / 1000.0, 1)),
+            }
+
+        return {
+            "link_ok": link_ok and seconds < LINK_LOSS_S,
+            "seconds_since_mcu": round(seconds, 1),
+            "mcu": mcu,
+            "session": session_dict,
             "leaderboard": self.leaderboard(),
         }
 
@@ -866,19 +906,14 @@ class GameEngine:
                 "score": session.score,
                 "streak": session.streak,
                 "round": session.round_index,
+                "expires_in_s": max(
+                    0.0,
+                    round((session.expires_at_mono - monotonic_ms()) / 1000.0, 1),
+                ),
             }
-            if (
-                session.state == SessionState.AWAITING_ANSWER
-                and self._pool_index < len(self._pool)
-                and session.round_started_mono is not None
-            ):
-                item = self._pool[self._pool_index]
-                payload["current"] = {
-                    "round": session.round_index,
-                    "limit_ms": session.round_limit_ms,
-                    "deadline_mono": session.round_started_mono + session.round_limit_ms,
-                    "item": item_to_payload(item, include_answer=False),
-                }
+            current = self._current_item_payload(session)
+            if current is not None:
+                payload["current"] = current
             return payload
 
     def review_payload(self, review_token: str) -> dict[str, Any]:

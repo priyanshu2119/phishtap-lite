@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PhishTap Lite — backend diagnostic</title>
+<!--
+  STAGE 2 DIAGNOSTIC PLACEHOLDER.
+
+  This is NOT the kiosk. Stage 3 replaces it with the real attract-mode screen,
+  QR code and leaderboard. It exists for one reason: to prove the whole backend
+  stack works end to end before any frontend is built on top of it.
+
+  What it exercises, in order:
+    browser  ->  WebUI brick (FastAPI + Uvicorn, port 7000)
+             ->  /api/health and /api/kiosk
+             ->  ApiService  ->  GameEngine  ->  BridgePort
+             ->  arduino.app_utils.Bridge.call  ->  arduino-router
+             ->  the MCU's provide_safe handler  ->  back again
+
+  If the MCU panel below shows a real state and a non-zero uptime, every one of
+  those hops is working. If it shows "no link", the failure is in the bridge or
+  the firmware, not in the web layer.
+
+  Deliberately self-contained: no CDN, no external font, no build step. The
+  architecture forbids external requests (docs/ARCHITECTURE.md §7) and a
+  diagnostic that needs internet to load is useless at an offline demo.
+-->
+<style>
+  :root {
+    --bg: #0d1117; --panel: #161b22; --border: #30363d;
+    --fg: #e6edf3; --dim: #8b949e;
+    --ok: #3fb950; --bad: #f85149; --warn: #d29922; --accent: #58a6ff;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 16px; background: var(--bg); color: var(--fg);
+    font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  h1 { font-size: 16px; margin: 0 0 4px; letter-spacing: .04em; }
+  .sub { color: var(--dim); font-size: 12px; margin-bottom: 16px; }
+  .grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 12px; }
+  .card h2 {
+    font-size: 11px; text-transform: uppercase; letter-spacing: .1em;
+    color: var(--dim); margin: 0 0 10px; font-weight: 600;
+  }
+  .big { font-size: 22px; font-weight: 700; }
+  .ok   { color: var(--ok); }
+  .bad  { color: var(--bad); }
+  .warn { color: var(--warn); }
+  .dim  { color: var(--dim); }
+  table { width: 100%; border-collapse: collapse; }
+  td { padding: 3px 0; vertical-align: top; }
+  td:first-child { color: var(--dim); white-space: nowrap; padding-right: 12px; }
+  td:last-child { text-align: right; word-break: break-all; }
+  pre {
+    margin: 0; padding: 8px; background: #0a0d12; border: 1px solid var(--border);
+    border-radius: 6px; overflow: auto; max-height: 320px;
+    font-size: 12px; white-space: pre-wrap; word-break: break-word;
+  }
+  .pill {
+    display: inline-block; padding: 2px 8px; border-radius: 999px;
+    border: 1px solid currentColor; font-size: 11px; font-weight: 700;
+  }
+  .foot { margin-top: 16px; color: var(--dim); font-size: 11px; }
+  a { color: var(--accent); }
+  .row { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+</style>
+</head>
+<body>
+
+<h1>PHISHTAP LITE &mdash; backend diagnostic</h1>
+<div class="sub">
+  Stage 2 placeholder. Proves browser &rarr; web server &rarr; API &rarr; engine
+  &rarr; bridge &rarr; MCU. Stage 3 replaces this with the real kiosk.
+</div>
+
+<div class="grid">
+
+  <div class="card">
+    <h2>Backend</h2>
+    <div class="row">
+      <span class="dim">/api/health</span>
+      <span id="health-state" class="pill dim">waiting</span>
+    </div>
+    <table style="margin-top:10px">
+      <tr><td>version</td><td id="h-version">&mdash;</td></tr>
+      <tr><td>protocol</td><td id="h-proto">&mdash;</td></tr>
+      <tr><td>uptime</td><td id="h-uptime">&mdash;</td></tr>
+      <tr><td>bridge_ok</td><td id="h-bridge">&mdash;</td></tr>
+      <tr><td>base_url</td><td id="h-baseurl">&mdash;</td></tr>
+    </table>
+  </div>
+
+  <div class="card">
+    <h2>MCU (from pt.get_status)</h2>
+    <div class="row">
+      <span class="dim">link</span>
+      <span id="mcu-link" class="pill dim">unknown</span>
+    </div>
+    <table style="margin-top:10px">
+      <tr><td>state</td><td id="m-state">&mdash;</td></tr>
+      <tr><td>fw</td><td id="m-fw">&mdash;</td></tr>
+      <tr><td>uptime</td><td id="m-uptime">&mdash;</td></tr>
+      <tr><td>rfid_ok</td><td id="m-rfid">&mdash;</td></tr>
+      <tr><td>rfid version</td><td id="m-rfidver">&mdash;</td></tr>
+      <tr><td>rfid state</td><td id="m-rfidstate">&mdash;</td></tr>
+      <tr><td>lives / round</td><td id="m-lives">&mdash;</td></tr>
+      <tr><td>queue / overflows</td><td id="m-queue">&mdash;</td></tr>
+    </table>
+  </div>
+
+  <div class="card">
+    <h2>Game</h2>
+    <table>
+      <tr><td>session state</td><td id="g-state">&mdash;</td></tr>
+      <tr><td>round</td><td id="g-round">&mdash;</td></tr>
+      <tr><td>lives</td><td id="g-lives">&mdash;</td></tr>
+      <tr><td>score</td><td id="g-score">&mdash;</td></tr>
+      <tr><td>PIN</td><td id="g-pin">&mdash;</td></tr>
+      <tr><td>session url</td><td id="g-url">&mdash;</td></tr>
+    </table>
+  </div>
+
+  <div class="card" style="grid-column: 1 / -1">
+    <h2>Raw /api/kiosk</h2>
+    <pre id="raw">waiting for the first response&hellip;</pre>
+  </div>
+
+</div>
+
+<div class="foot">
+  <span id="last-poll">never polled</span> &middot;
+  polling every 2 s &middot;
+  <a href="/api/health" target="_blank">/api/health</a> &middot;
+  <a href="/api/kiosk" target="_blank">/api/kiosk</a> &middot;
+  <a href="/api/leaderboard" target="_blank">/api/leaderboard</a>
+</div>
+
+<script>
+"use strict";
+
+// Everything is defensive: a missing field must render as a dash, never throw.
+// A diagnostic page that blanks out on an unexpected payload shape is worse than
+// no diagnostic page, because it hides the very thing being diagnosed.
+function $(id) { return document.getElementById(id); }
+
+function text(id, value) {
+  var el = $(id);
+  if (!el) return;
+  el.textContent = (value === undefined || value === null || value === "") ? "\u2014" : String(value);
+}
+
+function pill(id, label, cls) {
+  var el = $(id);
+  if (!el) return;
+  el.textContent = label;
+  el.className = "pill " + cls;
+}
+
+function bool(id, value, goodWord, badWord) {
+  var el = $(id);
+  if (!el) return;
+  if (value === true)       { el.textContent = goodWord || "yes"; el.className = "ok"; }
+  else if (value === false) { el.textContent = badWord  || "no";  el.className = "bad"; }
+  else                      { el.textContent = "\u2014";          el.className = "dim"; }
+}
+
+function fmtUptime(ms) {
+  if (typeof ms !== "number") return null;
+  var s = Math.floor(ms / 1000);
+  var m = Math.floor(s / 60);
+  s = s % 60;
+  return m > 0 ? (m + "m " + s + "s") : (s + "s");
+}
+
+var pollCount = 0;
+var errorCount = 0;
+
+async function getJSON(url) {
+  var res = await fetch(url, { cache: "no-store" });
+  if (!res.ok) throw new Error(url + " -> HTTP " + res.status);
+  return res.json();
+}
+
+async function pollHealth() {
+  try {
+    var d = await getJSON("/api/health");
+    // The API envelope is {ok, data} or {ok:false, err}; unwrap defensively.
+    var h = (d && d.data) ? d.data : d;
+    pollCount++;
+    pill("health-state", "reachable", "ok");
+    text("h-version", h.version);
+    text("h-proto", h.proto);
+    text("h-uptime", (typeof h.uptime_s === "number") ? (h.uptime_s + " s") : null);
+    bool("h-bridge", h.bridge_ok, "LINK UP", "NO LINK");
+    text("h-baseurl", h.base_url);
+    return h;
+  } catch (e) {
+    errorCount++;
+    pill("health-state", "unreachable", "bad");
+    text("h-version", null); text("h-proto", null); text("h-uptime", null);
+    bool("h-bridge", null); text("h-baseurl", null);
+    $("raw").textContent = "/api/health failed: " + e.message;
+    return null;
+  }
+}
+
+async function pollKiosk() {
+  try {
+    var d = await getJSON("/api/kiosk");
+    var k = (d && d.data) ? d.data : d;
+
+    $("raw").textContent = JSON.stringify(k, null, 2);
+
+    // MCU block. `mcu` is whatever pt.get_status returned, mirrored by the engine.
+    var m = k.mcu || k.status || {};
+    var linkUp = (m.state !== undefined) || (k.bridge_ok === true);
+    if (m.state) {
+      pill("mcu-link", "LINK UP", "ok");
+    } else if (k.bridge_ok === false) {
+      pill("mcu-link", "NO LINK", "bad");
+    } else {
+      pill("mcu-link", "no data", "warn");
+    }
+
+    text("m-state", m.state);
+    text("m-fw", m.fw);
+    text("m-uptime", fmtUptime(m.uptime_ms));
+    bool("m-rfid", m.rfid_ok, "ok", "FAULT");
+    if (m.rfid_version !== undefined && m.rfid_version !== null) {
+      var ver = Number(m.rfid_version).toString(16).toUpperCase();
+      text("m-rfidver", "0x" + (ver.length < 2 ? "0" + ver : ver) +
+           (m.rfid_version_documented ? "" : "  (clone die)"));
+    } else {
+      text("m-rfidver", null);
+    }
+    text("m-rfidstate", m.rfid_state);
+    text("m-lives", (m.lives !== undefined) ? (m.lives + " / " + (m.round || 0)) : null);
+    text("m-queue", (m.queue_len !== undefined)
+         ? (m.queue_len + " / " + (m.overflows || 0) + " ovf") : null);
+
+    // Game block.
+    text("g-state", k.state);
+    text("g-round", k.round);
+    text("g-lives", k.lives);
+    text("g-score", k.score);
+    var s = k.session || {};
+    text("g-pin", s.pin);
+    text("g-url", s.url);
+
+    $("last-poll").textContent = "last poll " + new Date().toLocaleTimeString() +
+      "  (ok " + pollCount + ", errors " + errorCount + ")";
+  } catch (e) {
+    errorCount++;
+    $("raw").textContent = "/api/kiosk failed: " + e.message;
+    $("last-poll").textContent = "last poll failed " + new Date().toLocaleTimeString() +
+      "  (ok " + pollCount + ", errors " + errorCount + ")";
+  }
+}
+
+async function tick() {
+  await pollHealth();
+  await pollKiosk();
+}
+
+tick();
+setInterval(tick, 2000);
+</script>
+
+</body>
+</html>

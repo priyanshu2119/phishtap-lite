@@ -3,271 +3,329 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>PhishTap Lite — backend diagnostic</title>
+<title>PhishTap — console</title>
+<meta name="robots" content="noindex, nofollow">
 <!--
-  STAGE 2 DIAGNOSTIC PLACEHOLDER.
+  PhishTap Lite — KIOSK PAGE.
 
-  This is NOT the kiosk. Stage 3 replaces it with the real attract-mode screen,
-  QR code and leaderboard. It exists for one reason: to prove the whole backend
-  stack works end to end before any frontend is built on top of it.
+  This is the laptop screen the audience watches. It is served as index.html
+  because the WebUI brick requires an index.html in its assets directory and
+  raises RuntimeError at startup without one.
 
-  What it exercises, in order:
-    browser  ->  WebUI brick (FastAPI + Uvicorn, port 7000)
-             ->  /api/health and /api/kiosk
-             ->  ApiService  ->  GameEngine  ->  BridgePort
-             ->  arduino.app_utils.Bridge.call  ->  arduino-router
-             ->  the MCU's provide_safe handler  ->  back again
+  It has four jobs, in order of importance:
+    1. Show a QR code and PIN so a phone can join.
+    2. Mirror the live game so the audience can follow along.
+    3. Say loudly when the console is not responding, because a silent black
+       screen at a demo reads as "their project is broken" rather than "the
+       board is unplugged".
+    4. Look like an arcade cabinet, not a dashboard.
 
-  If the MCU panel below shows a real state and a non-zero uptime, every one of
-  those hops is working. If it shows "no link", the failure is in the bridge or
-  the firmware, not in the web layer.
+  All state arrives over Socket.IO in the "kiosk" room, with REST /api/kiosk as
+  the fallback and as the initial paint. The page works with the socket entirely
+  unavailable; it just polls instead.
 
-  Deliberately self-contained: no CDN, no external font, no build step. The
-  architecture forbids external requests (docs/ARCHITECTURE.md §7) and a
-  diagnostic that needs internet to load is useless at an offline demo.
+  No external requests. No CDN. See LICENSES.md for the vendored libraries.
 -->
+<link rel="stylesheet" href="css/app.css">
 <style>
-  :root {
-    --bg: #0d1117; --panel: #161b22; --border: #30363d;
-    --fg: #e6edf3; --dim: #8b949e;
-    --ok: #3fb950; --bad: #f85149; --warn: #d29922; --accent: #58a6ff;
+  /* ── Kiosk-specific ──────────────────────────────────────────────────────
+   * Type is scaled up hard. This page is read from three metres away by people
+   * standing, on a laptop that is probably at 1366x768 and probably has a
+   * reflection on it. Anything under about 18px is decoration.
+   */
+  body { font-size: 18px; }
+
+  .kiosk {
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    padding: 24px 32px;
+    gap: 20px;
   }
-  * { box-sizing: border-box; }
-  body {
-    margin: 0; padding: 16px; background: var(--bg); color: var(--fg);
-    font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
+  .kiosk-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 16px;
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 14px;
   }
-  h1 { font-size: 16px; margin: 0 0 4px; letter-spacing: .04em; }
-  .sub { color: var(--dim); font-size: 12px; margin-bottom: 16px; }
-  .grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); }
-  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 12px; }
-  .card h2 {
-    font-size: 11px; text-transform: uppercase; letter-spacing: .1em;
-    color: var(--dim); margin: 0 0 10px; font-weight: 600;
+
+  .kiosk-brand { font-size: 28px; font-weight: 800; letter-spacing: -0.02em; }
+  .kiosk-brand span { color: var(--accent); }
+
+  .kiosk-body { flex: 1; display: flex; align-items: center; justify-content: center; }
+
+  .kiosk-foot {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 16px;
+    border-top: 1px solid var(--border);
+    padding-top: 12px;
+    font-size: 14px;
+    color: var(--fg-faint);
+    font-family: var(--font-mono);
   }
-  .big { font-size: 22px; font-weight: 700; }
-  .ok   { color: var(--ok); }
-  .bad  { color: var(--bad); }
-  .warn { color: var(--warn); }
-  .dim  { color: var(--dim); }
-  table { width: 100%; border-collapse: collapse; }
-  td { padding: 3px 0; vertical-align: top; }
-  td:first-child { color: var(--dim); white-space: nowrap; padding-right: 12px; }
-  td:last-child { text-align: right; word-break: break-all; }
-  pre {
-    margin: 0; padding: 8px; background: #0a0d12; border: 1px solid var(--border);
-    border-radius: 6px; overflow: auto; max-height: 320px;
-    font-size: 12px; white-space: pre-wrap; word-break: break-word;
+
+  /* Attract mode */
+  .attract { text-align: center; max-width: 900px; }
+  .attract-title {
+    font-size: clamp(56px, 11vw, 132px);
+    font-weight: 900;
+    letter-spacing: -0.04em;
+    line-height: 0.95;
+    margin: 0;
+    background: linear-gradient(180deg, #ffffff 0%, #7fb6ff 100%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
   }
-  .pill {
-    display: inline-block; padding: 2px 8px; border-radius: 999px;
-    border: 1px solid currentColor; font-size: 11px; font-weight: 700;
+  .attract-tag { font-size: clamp(20px, 2.6vw, 32px); color: var(--fg-dim); margin: 12px 0 28px; }
+  .attract-cta {
+    display: inline-block;
+    font-size: clamp(22px, 3vw, 34px);
+    font-weight: 800;
+    padding: 18px 34px;
+    border-radius: 999px;
+    border: 2px solid var(--accent);
+    color: var(--accent);
   }
-  .foot { margin-top: 16px; color: var(--dim); font-size: 11px; }
-  a { color: var(--accent); }
-  .row { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+
+  /* Join panel: QR + PIN side by side */
+  .join {
+    display: grid;
+    grid-template-columns: auto auto;
+    gap: 40px;
+    align-items: center;
+    justify-content: center;
+  }
+  @media (max-width: 820px) { .join { grid-template-columns: 1fr; gap: 24px; } }
+
+  .qr-box {
+    background: #fff;
+    padding: 16px;
+    border-radius: var(--radius-lg);
+    line-height: 0;
+  }
+  .qr-box img, .qr-box canvas { display: block; }
+  .qr-fallback {
+    line-height: 1.4;
+    color: #111;
+    font-family: var(--font-mono);
+    font-size: 13px;
+    max-width: 240px;
+    word-break: break-all;
+  }
+
+  .pin-panel { text-align: left; }
+  .pin-label { font-size: 20px; color: var(--fg-dim); text-transform: uppercase; letter-spacing: 0.1em; }
+  .pin-digits {
+    font-size: clamp(56px, 9vw, 96px);
+    font-weight: 900;
+    letter-spacing: 0.14em;
+    font-family: var(--font-mono);
+    color: var(--warn);
+    line-height: 1.1;
+  }
+  .pin-expiry { font-size: 18px; color: var(--fg-dim); margin-top: 8px; }
+
+  /* Live game mirror */
+  .mirror { width: 100%; max-width: 1000px; }
+  .mirror-stats {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 16px;
+    margin-bottom: 24px;
+  }
+  .stat {
+    background: var(--bg-raised);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    padding: 16px 20px;
+    text-align: center;
+  }
+  .stat-k { font-size: 14px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--fg-faint); }
+  .stat-v { font-size: clamp(36px, 5vw, 56px); font-weight: 900; line-height: 1.1; font-variant-numeric: tabular-nums; }
+  .stat-v.lives { color: var(--phish); letter-spacing: 0.08em; }
+
+  .mirror-msg {
+    background: var(--bg-raised);
+    border: 1px solid var(--border);
+    border-left: 6px solid var(--accent);
+    border-radius: var(--radius-lg);
+    padding: 20px 24px;
+    max-height: 46vh;
+    overflow: auto;
+  }
+  .mirror-msg-head { display: flex; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
+  .mirror-sender { font-weight: 700; font-size: 20px; }
+  .mirror-subject { color: var(--fg-dim); font-size: 18px; margin-bottom: 12px; }
+  .mirror-body { font-size: 20px; line-height: 1.55; white-space: pre-wrap; word-break: break-word; }
+
+  /* Game over */
+  .over { text-align: center; }
+  .over-score {
+    font-size: clamp(80px, 16vw, 190px);
+    font-weight: 900;
+    line-height: 0.9;
+    color: var(--warn);
+    font-variant-numeric: tabular-nums;
+  }
+  .over-who { font-size: clamp(24px, 3.4vw, 40px); margin-top: 8px; }
+  .over-why { font-size: 20px; color: var(--fg-dim); margin-top: 12px; }
+
+  /* Leaderboard */
+  .board { width: 100%; max-width: 720px; margin: 28px auto 0; }
+  .board-row {
+    display: grid;
+    grid-template-columns: 48px 1fr auto;
+    gap: 12px;
+    align-items: center;
+    padding: 10px 14px;
+    border-radius: var(--radius);
+    font-size: 20px;
+  }
+  .board-row:nth-child(odd) { background: rgba(255,255,255,0.03); }
+  .board-rank { color: var(--fg-faint); font-weight: 800; font-variant-numeric: tabular-nums; }
+  .board-row:first-child .board-rank { color: var(--warn); }
+  .board-name { font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .board-score { font-family: var(--font-mono); font-weight: 800; font-variant-numeric: tabular-nums; }
+
+  /* Status dot in the header */
+  .link-dot {
+    display: inline-block;
+    width: 12px; height: 12px;
+    border-radius: 50%;
+    background: var(--safe);
+    margin-right: 8px;
+    vertical-align: middle;
+  }
+  .link-dot.down { background: var(--phish); }
+  .link-dot.unknown { background: var(--fg-faint); }
+
+  .fault-banner {
+    font-size: 22px;
+    font-weight: 700;
+    padding: 16px 20px;
+    border-radius: var(--radius);
+    text-align: center;
+  }
+
+  /* Full-screen flash on a round result, so the audience sees the outcome even
+   * from the back of the room. Brief and colour-only: no text, because reading
+   * text from three metres away while it flashes is not possible anyway. */
+  .flash-overlay {
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    opacity: 0;
+    z-index: 50;
+  }
+  .flash-overlay.good { background: var(--safe); animation: pt-flash 700ms ease-out; }
+  .flash-overlay.bad  { background: var(--phish); animation: pt-flash 700ms ease-out; }
 </style>
 </head>
 <body>
 
-<h1>PHISHTAP LITE &mdash; backend diagnostic</h1>
-<div class="sub">
-  Stage 2 placeholder. Proves browser &rarr; web server &rarr; API &rarr; engine
-  &rarr; bridge &rarr; MCU. Stage 3 replaces this with the real kiosk.
-</div>
+<div class="kiosk">
 
-<div class="grid">
-
-  <div class="card">
-    <h2>Backend</h2>
-    <div class="row">
-      <span class="dim">/api/health</span>
-      <span id="health-state" class="pill dim">waiting</span>
+  <header class="kiosk-head">
+    <div class="kiosk-brand">Phish<span>Tap</span></div>
+    <div id="link-status" class="small muted">
+      <span id="link-dot" class="link-dot unknown"></span><span id="link-text">connecting…</span>
     </div>
-    <table style="margin-top:10px">
-      <tr><td>version</td><td id="h-version">&mdash;</td></tr>
-      <tr><td>protocol</td><td id="h-proto">&mdash;</td></tr>
-      <tr><td>uptime</td><td id="h-uptime">&mdash;</td></tr>
-      <tr><td>bridge_ok</td><td id="h-bridge">&mdash;</td></tr>
-      <tr><td>base_url</td><td id="h-baseurl">&mdash;</td></tr>
-    </table>
-  </div>
+  </header>
 
-  <div class="card">
-    <h2>MCU (from pt.get_status)</h2>
-    <div class="row">
-      <span class="dim">link</span>
-      <span id="mcu-link" class="pill dim">unknown</span>
-    </div>
-    <table style="margin-top:10px">
-      <tr><td>state</td><td id="m-state">&mdash;</td></tr>
-      <tr><td>fw</td><td id="m-fw">&mdash;</td></tr>
-      <tr><td>uptime</td><td id="m-uptime">&mdash;</td></tr>
-      <tr><td>rfid_ok</td><td id="m-rfid">&mdash;</td></tr>
-      <tr><td>rfid version</td><td id="m-rfidver">&mdash;</td></tr>
-      <tr><td>rfid state</td><td id="m-rfidstate">&mdash;</td></tr>
-      <tr><td>lives / round</td><td id="m-lives">&mdash;</td></tr>
-      <tr><td>queue / overflows</td><td id="m-queue">&mdash;</td></tr>
-    </table>
-  </div>
+  <!-- Hardware / link fault. Shown above everything else, because nothing else on
+       the page can be trusted while the console is unreachable. -->
+  <div id="fault" class="banner banner-error fault-banner is-hidden" role="alert"></div>
 
-  <div class="card">
-    <h2>Game</h2>
-    <table>
-      <tr><td>session state</td><td id="g-state">&mdash;</td></tr>
-      <tr><td>round</td><td id="g-round">&mdash;</td></tr>
-      <tr><td>lives</td><td id="g-lives">&mdash;</td></tr>
-      <tr><td>score</td><td id="g-score">&mdash;</td></tr>
-      <tr><td>PIN</td><td id="g-pin">&mdash;</td></tr>
-      <tr><td>session url</td><td id="g-url">&mdash;</td></tr>
-    </table>
-  </div>
+  <main class="kiosk-body">
 
-  <div class="card" style="grid-column: 1 / -1">
-    <h2>Raw /api/kiosk</h2>
-    <pre id="raw">waiting for the first response&hellip;</pre>
-  </div>
+    <!-- ATTRACT: no session -->
+    <section id="view-attract" class="attract is-hidden">
+      <h1 class="attract-title" id="attract-title">PhishTap</h1>
+      <p class="attract-tag" id="attract-tag"></p>
+      <div class="attract-cta pulse" id="attract-cta"></div>
+
+      <div class="board" id="board-wrap">
+        <div class="eyebrow center" id="board-title"></div>
+        <div id="board-list"></div>
+      </div>
+    </section>
+
+    <!-- JOIN: session created, waiting for a phone -->
+    <section id="view-join" class="is-hidden">
+      <div class="join">
+        <div>
+          <div class="qr-box" id="qr"></div>
+          <p class="hint center" id="qr-url" style="margin-top:12px; max-width:260px;"></p>
+        </div>
+        <div class="pin-panel">
+          <div class="pin-label" id="pin-label"></div>
+          <div class="pin-digits" id="pin-digits">----</div>
+          <div class="pin-expiry" id="pin-expiry"></div>
+          <p class="muted" id="join-hint" style="margin-top:20px; max-width:340px;"></p>
+        </div>
+      </div>
+    </section>
+
+    <!-- PLAYING: mirror the phone -->
+    <section id="view-play" class="mirror is-hidden">
+      <div class="mirror-stats">
+        <div class="stat">
+          <div class="stat-k" id="k-round"></div>
+          <div class="stat-v" id="v-round">0</div>
+        </div>
+        <div class="stat">
+          <div class="stat-k" id="k-lives"></div>
+          <div class="stat-v lives" id="v-lives">♥♥♥</div>
+        </div>
+        <div class="stat">
+          <div class="stat-k" id="k-score"></div>
+          <div class="stat-v" id="v-score">0</div>
+        </div>
+      </div>
+      <div class="mirror-msg">
+        <div class="mirror-msg-head">
+          <div class="mirror-sender" id="m-sender"></div>
+          <div class="pill pill-dim" id="m-channel"></div>
+        </div>
+        <div class="mirror-subject" id="m-subject"></div>
+        <div class="mirror-body" id="m-body"></div>
+      </div>
+      <p class="center muted" id="play-who" style="margin-top:16px;"></p>
+    </section>
+
+    <!-- OVER -->
+    <section id="view-over" class="over is-hidden">
+      <div class="eyebrow" id="over-eyebrow"></div>
+      <div class="over-score" id="over-score">0</div>
+      <div class="over-who" id="over-who"></div>
+      <div class="over-why" id="over-why"></div>
+      <div class="board" id="over-board-wrap">
+        <div class="eyebrow center" id="over-board-title"></div>
+        <div id="over-board-list"></div>
+      </div>
+    </section>
+
+  </main>
+
+  <footer class="kiosk-foot">
+    <span id="foot-left"></span>
+    <span id="foot-right"></span>
+  </footer>
 
 </div>
 
-<div class="foot">
-  <span id="last-poll">never polled</span> &middot;
-  polling every 2 s &middot;
-  <a href="/api/health" target="_blank">/api/health</a> &middot;
-  <a href="/api/kiosk" target="_blank">/api/kiosk</a> &middot;
-  <a href="/api/leaderboard" target="_blank">/api/leaderboard</a>
-</div>
+<div id="flash" class="flash-overlay"></div>
 
-<script>
-"use strict";
-
-// Everything is defensive: a missing field must render as a dash, never throw.
-// A diagnostic page that blanks out on an unexpected payload shape is worse than
-// no diagnostic page, because it hides the very thing being diagnosed.
-function $(id) { return document.getElementById(id); }
-
-function text(id, value) {
-  var el = $(id);
-  if (!el) return;
-  el.textContent = (value === undefined || value === null || value === "") ? "\u2014" : String(value);
-}
-
-function pill(id, label, cls) {
-  var el = $(id);
-  if (!el) return;
-  el.textContent = label;
-  el.className = "pill " + cls;
-}
-
-function bool(id, value, goodWord, badWord) {
-  var el = $(id);
-  if (!el) return;
-  if (value === true)       { el.textContent = goodWord || "yes"; el.className = "ok"; }
-  else if (value === false) { el.textContent = badWord  || "no";  el.className = "bad"; }
-  else                      { el.textContent = "\u2014";          el.className = "dim"; }
-}
-
-function fmtUptime(ms) {
-  if (typeof ms !== "number") return null;
-  var s = Math.floor(ms / 1000);
-  var m = Math.floor(s / 60);
-  s = s % 60;
-  return m > 0 ? (m + "m " + s + "s") : (s + "s");
-}
-
-var pollCount = 0;
-var errorCount = 0;
-
-async function getJSON(url) {
-  var res = await fetch(url, { cache: "no-store" });
-  if (!res.ok) throw new Error(url + " -> HTTP " + res.status);
-  return res.json();
-}
-
-async function pollHealth() {
-  try {
-    var d = await getJSON("/api/health");
-    // The API envelope is {ok, data} or {ok:false, err}; unwrap defensively.
-    var h = (d && d.data) ? d.data : d;
-    pollCount++;
-    pill("health-state", "reachable", "ok");
-    text("h-version", h.version);
-    text("h-proto", h.proto);
-    text("h-uptime", (typeof h.uptime_s === "number") ? (h.uptime_s + " s") : null);
-    bool("h-bridge", h.bridge_ok, "LINK UP", "NO LINK");
-    text("h-baseurl", h.base_url);
-    return h;
-  } catch (e) {
-    errorCount++;
-    pill("health-state", "unreachable", "bad");
-    text("h-version", null); text("h-proto", null); text("h-uptime", null);
-    bool("h-bridge", null); text("h-baseurl", null);
-    $("raw").textContent = "/api/health failed: " + e.message;
-    return null;
-  }
-}
-
-async function pollKiosk() {
-  try {
-    var d = await getJSON("/api/kiosk");
-    var k = (d && d.data) ? d.data : d;
-
-    $("raw").textContent = JSON.stringify(k, null, 2);
-
-    // MCU block. `mcu` is whatever pt.get_status returned, mirrored by the engine.
-    var m = k.mcu || k.status || {};
-    var linkUp = (m.state !== undefined) || (k.bridge_ok === true);
-    if (m.state) {
-      pill("mcu-link", "LINK UP", "ok");
-    } else if (k.bridge_ok === false) {
-      pill("mcu-link", "NO LINK", "bad");
-    } else {
-      pill("mcu-link", "no data", "warn");
-    }
-
-    text("m-state", m.state);
-    text("m-fw", m.fw);
-    text("m-uptime", fmtUptime(m.uptime_ms));
-    bool("m-rfid", m.rfid_ok, "ok", "FAULT");
-    if (m.rfid_version !== undefined && m.rfid_version !== null) {
-      var ver = Number(m.rfid_version).toString(16).toUpperCase();
-      text("m-rfidver", "0x" + (ver.length < 2 ? "0" + ver : ver) +
-           (m.rfid_version_documented ? "" : "  (clone die)"));
-    } else {
-      text("m-rfidver", null);
-    }
-    text("m-rfidstate", m.rfid_state);
-    text("m-lives", (m.lives !== undefined) ? (m.lives + " / " + (m.round || 0)) : null);
-    text("m-queue", (m.queue_len !== undefined)
-         ? (m.queue_len + " / " + (m.overflows || 0) + " ovf") : null);
-
-    // Game block.
-    text("g-state", k.state);
-    text("g-round", k.round);
-    text("g-lives", k.lives);
-    text("g-score", k.score);
-    var s = k.session || {};
-    text("g-pin", s.pin);
-    text("g-url", s.url);
-
-    $("last-poll").textContent = "last poll " + new Date().toLocaleTimeString() +
-      "  (ok " + pollCount + ", errors " + errorCount + ")";
-  } catch (e) {
-    errorCount++;
-    $("raw").textContent = "/api/kiosk failed: " + e.message;
-    $("last-poll").textContent = "last poll failed " + new Date().toLocaleTimeString() +
-      "  (ok " + pollCount + ", errors " + errorCount + ")";
-  }
-}
-
-async function tick() {
-  await pollHealth();
-  await pollKiosk();
-}
-
-tick();
-setInterval(tick, 2000);
-</script>
-
+<script src="libs/socket.io.min.js"></script>
+<script src="libs/qrcode.min.js"></script>
+<script src="js/strings.js"></script>
+<script src="js/common.js"></script>
+<script src="js/kiosk.js"></script>
 </body>
 </html>

@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1, user-scalable=no">
+<title>PhishTap — play</title>
+<meta name="robots" content="noindex, nofollow">
+<meta name="theme-color" content="#07090f">
+<!--
+  PhishTap Lite — PHONE GAME PAGE.
+
+  Opened by scanning the kiosk's QR code, which encodes
+  `<base_url>/game.html?token=<session token>`.
+
+  Design constraints that shaped this page:
+
+  * ONE-HANDED, STANDING UP, UNDER TIME PRESSURE. The two answer buttons are the
+    bottom half of the screen and are far larger than they need to be. Fitts's law
+    is not a nicety here; a mis-tap costs a life.
+  * NO ZOOM, NO SCROLL BOUNCE. A pinch-zoom or a rubber-band scroll mid-round
+    loses the player their place and the round keeps running without them.
+  * THE ANSWER IS NEVER IN THE PAGE. The server sends the message with
+    include_answer=False, so there is nothing to find in the DOM or the network
+    tab. Revealing it would defeat the entire purpose of the tool.
+  * THE COUNTDOWN IS CLIENT-SIDE from a remaining-ms figure the server supplies.
+    Per-second traffic would make the timer stutter on a congested network, and a
+    stuttering timer is unfair rather than merely ugly.
+  * REST IS THE SOURCE OF TRUTH, the socket is the fast path. If the socket drops,
+    the page polls and the game continues; the server grades a timeout by its own
+    deadline either way.
+-->
+<link rel="stylesheet" href="css/app.css">
+<style>
+  html, body {
+    height: 100%;
+    overflow: hidden;          /* the game is exactly one screen; scrolling loses place */
+    overscroll-behavior: none;
+    touch-action: manipulation;
+  }
+
+  .game {
+    height: 100dvh;            /* dvh, not vh: mobile browser chrome otherwise hides the buttons */
+    display: flex;
+    flex-direction: column;
+  }
+
+  /* Fallback for browsers without dvh. Declared first so dvh wins where supported. */
+  @supports not (height: 100dvh) { .game { height: 100vh; } }
+
+  .game-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 10px 14px;
+    gap: 10px;
+    border-bottom: 1px solid var(--border);
+    flex: 0 0 auto;
+  }
+  .hud { display: flex; gap: 14px; align-items: baseline; font-variant-numeric: tabular-nums; }
+  .hud-k { font-size: var(--fs-xs); color: var(--fg-faint); text-transform: uppercase; letter-spacing: 0.08em; }
+  .hud-v { font-size: var(--fs-lg); font-weight: 800; }
+  .hud-lives { color: var(--phish); letter-spacing: 0.06em; }
+
+  /* The timer bar. It is the single most important element on the screen after
+   * the message, so it is full-bleed and changes colour as time runs out. */
+  .timer {
+    flex: 0 0 auto;
+    height: 8px;
+    background: var(--bg-sunken);
+    position: relative;
+    overflow: hidden;
+  }
+  .timer-fill {
+    position: absolute;
+    inset: 0 auto 0 0;
+    width: 100%;
+    background: var(--safe);
+    transition: background 200ms linear;
+  }
+  .timer-fill.mid  { background: var(--warn); }
+  .timer-fill.low  { background: var(--phish); }
+  .timer-seconds {
+    position: absolute;
+    right: 10px; top: 50%;
+    transform: translateY(-50%);
+    font-size: var(--fs-xs);
+    font-family: var(--font-mono);
+    color: var(--fg-dim);
+    background: rgba(4,6,11,0.7);
+    padding: 0 5px;
+    border-radius: 4px;
+  }
+
+  .game-body {
+    flex: 1 1 auto;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+    padding: 14px;
+  }
+
+  /* The message is styled to look like the thing it is pretending to be, because
+   * recognising the shape of a message is half the skill. A WhatsApp bubble reads
+   * differently from a bank email and the player should feel that. */
+  .msg { border-radius: var(--radius-lg); overflow: hidden; border: 1px solid var(--border); }
+  .msg-head {
+    display: flex; justify-content: space-between; align-items: center; gap: 10px;
+    padding: 10px 14px; background: var(--bg-raised); border-bottom: 1px solid var(--border);
+  }
+  .msg-sender { font-weight: 700; font-size: var(--fs-md); word-break: break-word; }
+  .msg-subject { padding: 10px 14px 0; color: var(--fg-dim); font-size: var(--fs-sm); }
+  .msg-body {
+    padding: 14px;
+    background: var(--bg-sunken);
+    font-size: var(--fs-md);
+    line-height: 1.6;
+    /* pre-wrap preserves the line breaks the corpus author wrote, which matter:
+     * a run-on block of text is itself a phishing tell. */
+    white-space: pre-wrap;
+    word-break: break-word;
+    /* Links are defanged server-side and rendered as text. This is belt and
+     * braces: even if a defanged URL somehow became clickable, no navigation. */
+    pointer-events: none;
+    user-select: text;
+  }
+  .msg-whatsapp .msg-body { background: #0b1a12; }
+  .msg-sms .msg-body { background: #10131c; }
+
+  .game-foot {
+    flex: 0 0 auto;
+    padding: 12px 14px calc(12px + env(safe-area-inset-bottom));
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+    border-top: 1px solid var(--border);
+    background: var(--bg);
+  }
+
+  .answer {
+    min-height: 88px;
+    font-size: var(--fs-xl);
+    font-weight: 900;
+    letter-spacing: 0.04em;
+    border-radius: var(--radius-lg);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 2px;
+    padding: 10px;
+  }
+  .answer small { font-size: var(--fs-xs); font-weight: 600; opacity: 0.75; letter-spacing: 0; }
+
+  /* Feedback overlay. Covers the message so the player cannot keep reading while
+   * the next round loads, and gives an unambiguous colour signal for the ~900ms
+   * before the next message appears. */
+  .verdict {
+    position: fixed;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    z-index: 40;
+    font-weight: 900;
+    text-align: center;
+    padding: 24px;
+  }
+  .verdict.good { background: rgba(20, 83, 45, 0.96); color: #d6ffe9; }
+  .verdict.bad  { background: rgba(122, 31, 40, 0.96); color: #ffe3e6; }
+  .verdict-word { font-size: clamp(40px, 13vw, 76px); line-height: 1; }
+  .verdict-sub  { font-size: var(--fs-lg); font-weight: 600; opacity: 0.9; }
+  .verdict-pts  { font-size: var(--fs-2xl); font-variant-numeric: tabular-nums; }
+
+  /* Screens that replace the game entirely: consent, loading, ended, gone. */
+  .screen {
+    height: 100dvh;
+    overflow-y: auto;
+    padding: 24px 20px calc(24px + env(safe-area-inset-bottom));
+  }
+  @supports not (height: 100dvh) { .screen { height: 100vh; } }
+
+  .consent-body p { font-size: var(--fs-sm); color: var(--fg-dim); }
+  .consent-body p strong { color: var(--fg); }
+
+  .ended-score {
+    font-size: clamp(72px, 22vw, 140px);
+    font-weight: 900;
+    line-height: 0.9;
+    color: var(--warn);
+    text-align: center;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .conn-banner {
+    position: fixed;
+    left: 0; right: 0; top: 0;
+    z-index: 60;
+    padding: 8px 14px;
+    font-size: var(--fs-sm);
+    font-weight: 700;
+    text-align: center;
+    background: var(--warn-dim);
+    color: #ffedc9;
+    border-bottom: 1px solid var(--warn);
+  }
+</style>
+</head>
+<body>
+
+<div id="conn" class="conn-banner is-hidden" role="status"></div>
+
+<!-- LOADING -->
+<section id="screen-loading" class="screen center is-hidden">
+  <div style="margin-top:30vh">
+    <h1 id="loading-title">PhishTap</h1>
+    <p class="muted" id="loading-text"></p>
+  </div>
+</section>
+
+<!-- CONSENT -->
+<section id="screen-consent" class="screen is-hidden">
+  <h1 id="consent-title"></h1>
+  <div class="consent-body">
+    <p id="consent-body"></p>
+    <p id="consent-pseudonymous"></p>
+    <p id="consent-retention"></p>
+    <p id="consent-norealdata"></p>
+  </div>
+
+  <div class="field">
+    <label for="nickname" id="nickname-label"></label>
+    <input id="nickname" type="text" autocomplete="nickname" maxlength="12"
+           inputmode="text" enterkeyhint="go" spellcheck="false">
+    <div class="hint" id="nickname-hint"></div>
+  </div>
+
+  <div id="consent-error" class="banner banner-error is-hidden" role="alert"></div>
+
+  <div class="stack" style="margin-top:20px">
+    <button id="btn-consent" class="btn btn-accent btn-block btn-lg"></button>
+    <button id="btn-decline" class="btn btn-ghost btn-block"></button>
+  </div>
+
+  <section id="consent-declined" class="is-hidden" style="margin-top:24px">
+    <div class="banner banner-info" id="declined-text"></div>
+  </section>
+</section>
+
+<!-- PLAY -->
+<section id="screen-play" class="game is-hidden">
+  <header class="game-head">
+    <div class="hud">
+      <div><div class="hud-k" id="k-round"></div><div class="hud-v" id="v-round">1</div></div>
+      <div><div class="hud-k" id="k-score"></div><div class="hud-v" id="v-score">0</div></div>
+    </div>
+    <div class="hud">
+      <div class="right">
+        <div class="hud-k" id="k-lives"></div>
+        <div class="hud-v hud-lives" id="v-lives"></div>
+      </div>
+    </div>
+  </header>
+
+  <div class="timer" role="timer" aria-live="off">
+    <div id="timer-fill" class="timer-fill"></div>
+    <div id="timer-seconds" class="timer-seconds"></div>
+    <span id="timer-sr" class="sr-only" aria-live="polite"></span>
+  </div>
+
+  <div class="game-body">
+    <div id="msg" class="msg">
+      <div class="msg-head">
+        <div class="msg-sender" id="msg-sender"></div>
+        <div class="pill pill-dim" id="msg-channel"></div>
+      </div>
+      <div class="msg-subject" id="msg-subject"></div>
+      <div class="msg-body" id="msg-body"></div>
+    </div>
+    <p class="center muted small" id="msg-prompt" style="margin-top:16px;"></p>
+  </div>
+
+  <footer class="game-foot">
+    <button id="btn-phish" class="answer btn-phish">
+      <span id="btn-phish-label"></span>
+      <small id="btn-phish-hint"></small>
+    </button>
+    <button id="btn-safe" class="answer btn-safe">
+      <span id="btn-safe-label"></span>
+      <small id="btn-safe-hint"></small>
+    </button>
+  </footer>
+</section>
+
+<!-- VERDICT OVERLAY -->
+<div id="verdict" class="verdict is-hidden">
+  <div class="verdict-word" id="verdict-word"></div>
+  <div class="verdict-sub" id="verdict-sub"></div>
+  <div class="verdict-pts" id="verdict-pts"></div>
+</div>
+
+<!-- GAME OVER -->
+<section id="screen-over" class="screen is-hidden">
+  <div class="eyebrow center" id="over-eyebrow"></div>
+  <div class="ended-score" id="over-score">0</div>
+  <p class="center muted" id="over-rounds"></p>
+  <div class="stack" style="margin-top:28px">
+    <a id="btn-review" class="btn btn-accent btn-block btn-lg" href="#"></a>
+    <p class="center muted small" id="over-again"></p>
+  </div>
+</section>
+
+<!-- SESSION GONE -->
+<section id="screen-gone" class="screen center is-hidden">
+  <div style="margin-top:30vh">
+    <h1 id="gone-title"></h1>
+    <p class="muted" id="gone-text"></p>
+  </div>
+</section>
+
+<script src="libs/socket.io.min.js"></script>
+<script src="js/strings.js"></script>
+<script src="js/common.js"></script>
+<script src="js/game.js"></script>
+</body>
+</html>

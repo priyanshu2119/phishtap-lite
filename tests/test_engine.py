@@ -215,6 +215,57 @@ def test_round_start_notification_never_contains_the_answer(engine, store, bridg
         assert forbidden not in item
 
 
+def test_kiosk_snapshot_never_contains_the_answer(engine, store, bridge):
+    """Stricter than the phone case, because the kiosk is a PUBLIC page.
+
+    The kiosk snapshot now carries the live message so the audience can follow
+    along on the big screen. But /api/kiosk needs no token and no authentication —
+    anyone on the same Wi-Fi can load it, including the student currently playing.
+    If the label were in that payload, the answer to every round would be one
+    browser tab away and the tool would teach nothing at all.
+
+    This is risk R6 in docs/ARCHITECTURE.md, and it is the assertion that keeps
+    the audience mirror from becoming a cheat sheet.
+    """
+    session = _start_game(engine, store, bridge)
+    snap = engine.kiosk_snapshot()
+
+    assert snap["session"] is not None
+    current = snap["session"]["current"]
+    assert current is not None, "a live round should be mirrored to the kiosk"
+
+    item = current["item"]
+    for forbidden in ("label", "cues", "explanation", "lesson"):
+        assert forbidden not in item, f"{forbidden} leaked to the public kiosk page"
+
+    # And the message text itself must be there, or the mirror is pointless.
+    assert item["body"], "the kiosk mirror carries no message body"
+    assert item["channel"]
+
+
+def test_kiosk_snapshot_omits_current_outside_a_live_round(engine, store, bridge):
+    """Before the first round is armed there is nothing to mirror, and inventing
+    one would show the audience a message nobody has been asked about."""
+    bridge.inject_tap(UID)
+    engine.poll()
+    snap = engine.kiosk_snapshot()
+    assert snap["session"] is not None
+    assert snap["session"]["current"] is None
+
+
+def test_kiosk_and_phone_agree_on_the_live_message(engine, store, bridge):
+    """Both payloads are built from one helper, so they cannot drift.
+
+    If they ever did, the audience would watch one message while the player
+    answered another, which looks like a bug in front of a room and is very hard
+    to diagnose afterwards from a single screenshot.
+    """
+    session = _start_game(engine, store, bridge)
+    kiosk_item = engine.kiosk_snapshot()["session"]["current"]["item"]
+    phone_item = engine.session_payload(session.token)["current"]["item"]
+    assert kiosk_item == phone_item
+
+
 def test_round_result_reports_correctness_but_not_the_label(engine, store, bridge, notifier, real_corpus):
     session = _start_game(engine, store, bridge)
     _answer_correctly(engine, store, real_corpus, session)

@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>PhishTap — join with PIN</title>
+<meta name="robots" content="noindex, nofollow">
+<meta name="theme-color" content="#07090f">
+<!--
+  PhishTap Lite — JOIN PAGE (PIN fallback).
+
+  Exists because QR scanning fails in real rooms: a cracked phone camera, a
+  reflective laptop screen, a projector washing out the contrast, or a student
+  whose camera app will not focus at that distance. Without a fallback the only
+  option is to abandon the session, and the queue behind that student watches.
+
+  The PIN is four digits, which is only 10,000 possibilities, so the server rate
+  limits per IP and locks out after five wrong attempts. That is why this page
+  shows remaining attempts rather than silently failing: a lockout that looks like
+  a broken form gets reported as a bug instead of waited out.
+-->
+<link rel="stylesheet" href="css/app.css">
+<style>
+  .join-wrap { max-width: 420px; margin: 0 auto; padding: 48px 20px; }
+  .pin-input {
+    font-size: 40px;
+    text-align: center;
+    letter-spacing: 0.5em;
+    font-family: var(--font-mono);
+    font-weight: 800;
+    padding-left: 0.5em;   /* offsets the trailing letter-space so digits look centred */
+  }
+</style>
+</head>
+<body>
+
+<div class="join-wrap">
+  <h1 class="center" id="title"></h1>
+  <p class="muted center small" id="body"></p>
+
+  <div class="field" style="margin-top:28px">
+    <label for="pin" id="pin-label"></label>
+    <input id="pin" class="pin-input" type="tel" inputmode="numeric"
+           pattern="[0-9]*" maxlength="4" autocomplete="one-time-code"
+           enterkeyhint="go" aria-describedby="pin-hint">
+    <div class="hint center" id="pin-hint"></div>
+  </div>
+
+  <div id="error" class="banner banner-error is-hidden" role="alert" style="margin-top:16px"></div>
+
+  <button id="btn-join" class="btn btn-accent btn-block btn-lg" style="margin-top:20px"></button>
+
+  <p class="center tiny faint" style="margin-top:24px" id="foot"></p>
+</div>
+
+<script src="js/strings.js"></script>
+<script src="js/common.js"></script>
+<script src="js/join.js"></script>
+</body>
+</html>

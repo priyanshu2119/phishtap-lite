@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PhishTap — admin</title>
+<meta name="robots" content="noindex, nofollow">
+<meta name="theme-color" content="#07090f">
+<!--
+  PhishTap Lite — ADMIN PANEL.
+
+  Protected by a six-digit PIN generated on first boot and printed once to the
+  Python console. The resulting admin token is sent as an X-Admin-Token HEADER,
+  never as a query parameter: a token in a URL lands in access logs, browser
+  history and Referer headers, which is a needless way to leak something that
+  grants database deletion.
+
+  The token is kept in sessionStorage rather than localStorage, so closing the tab
+  ends the session. An admin panel left open on a shared demo laptop should not
+  still be authenticated next week.
+
+  This page is not linked from anywhere. It is reached by typing /admin.html.
+-->
+<link rel="stylesheet" href="css/app.css">
+<style>
+  .admin-head {
+    display: flex; justify-content: space-between; align-items: center;
+    gap: 16px; padding-bottom: 14px; margin-bottom: 20px;
+    border-bottom: 1px solid var(--border);
+  }
+  .login-box { max-width: 380px; margin: 12vh auto 0; }
+  .kv { display: grid; grid-template-columns: auto 1fr; gap: 6px 16px; font-size: var(--fs-sm); }
+  .kv dt { color: var(--fg-faint); }
+  .kv dd { margin: 0; font-family: var(--font-mono); text-align: right; word-break: break-all; }
+  .metric-grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); }
+  .metric { background: var(--bg-sunken); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px; }
+  .metric-k { font-size: var(--fs-xs); color: var(--fg-faint); text-transform: uppercase; letter-spacing: 0.08em; }
+  .metric-v { font-size: var(--fs-xl); font-weight: 800; font-variant-numeric: tabular-nums; margin-top: 2px; }
+  .bar-track { height: 6px; background: var(--bg-sunken); border-radius: 3px; overflow: hidden; margin-top: 6px; }
+  .bar-fill { height: 100%; background: var(--accent); }
+  .danger { border-color: var(--phish); }
+  .danger h2 { color: var(--phish); }
+  section.card + section.card { margin-top: var(--gap); }
+</style>
+</head>
+<body>
+
+<div class="wrap wrap-wide">
+
+  <!-- LOGIN -->
+  <section id="screen-login" class="login-box card is-hidden">
+    <h1 id="login-title"></h1>
+    <p class="small muted" id="login-body"></p>
+    <div class="field">
+      <label for="pin" id="pin-label"></label>
+      <input id="pin" type="password" inputmode="numeric" autocomplete="off" maxlength="12">
+    </div>
+    <div id="login-error" class="banner banner-error is-hidden" role="alert" style="margin-top:12px"></div>
+    <button id="btn-login" class="btn btn-accent btn-block" style="margin-top:16px"></button>
+  </section>
+
+  <!-- PANEL -->
+  <main id="screen-panel" class="is-hidden">
+
+    <header class="admin-head">
+      <h1 id="panel-title" style="margin:0"></h1>
+      <button id="btn-logout" class="btn btn-ghost"></button>
+    </header>
+
+    <div id="panel-error" class="banner banner-error is-hidden" role="alert" style="margin-bottom:16px"></div>
+    <div id="panel-ok" class="banner banner-ok is-hidden" role="status" style="margin-bottom:16px"></div>
+
+    <!-- Overview -->
+    <section class="card">
+      <h2 id="health-title"></h2>
+      <dl class="kv" id="health-kv"></dl>
+    </section>
+
+    <!-- Cohort -->
+    <section class="card">
+      <h2 id="cohort-title"></h2>
+      <div class="metric-grid" id="cohort-grid"></div>
+      <div id="cohort-labels" style="margin-top:16px"></div>
+    </section>
+
+    <!-- By cue -->
+    <section class="card">
+      <h2 id="cue-title"></h2>
+      <p class="small muted" id="cue-hint"></p>
+      <div style="overflow-x:auto">
+        <table class="data" id="cue-table">
+          <thead><tr id="cue-head"></tr></thead>
+          <tbody id="cue-body"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- Reaction time -->
+    <section class="card">
+      <h2 id="reaction-title"></h2>
+      <p class="small muted" id="reaction-hint"></p>
+      <div style="overflow-x:auto">
+        <table class="data" id="reaction-table">
+          <thead><tr id="reaction-head"></tr></thead>
+          <tbody id="reaction-body"></tbody>
+        </table>
+      </div>
+      <p class="tiny faint" id="reaction-excluded" style="margin-top:8px"></p>
+    </section>
+
+    <!-- Funnel -->
+    <section class="card">
+      <h2 id="funnel-title"></h2>
+      <p class="small muted" id="funnel-hint"></p>
+      <div class="metric-grid" id="funnel-grid"></div>
+    </section>
+
+    <!-- Export -->
+    <section class="card">
+      <h2 id="export-title"></h2>
+      <p class="small muted" id="export-hint"></p>
+      <button id="btn-export" class="btn btn-accent"></button>
+    </section>
+
+    <!-- Danger zone -->
+    <section class="card danger">
+      <h2 id="danger-title"></h2>
+
+      <div class="field">
+        <label for="player-id" id="player-delete-label"></label>
+        <div class="row">
+          <input id="player-id" type="text" class="mono" autocomplete="off" spellcheck="false">
+          <button id="btn-delete-player" class="btn btn-danger"></button>
+        </div>
+      </div>
+
+      <div class="field" style="margin-top:24px">
+        <label for="clock-offset" id="clock-label"></label>
+        <p class="small muted" id="clock-body"></p>
+        <div class="row">
+          <input id="clock-offset" type="number" step="1000" class="mono">
+          <button id="btn-clock" class="btn"></button>
+        </div>
+        <p class="tiny faint" id="clock-current" style="margin-top:6px"></p>
+      </div>
+
+      <div class="field" style="margin-top:24px">
+        <label for="reset-confirm" id="reset-title"></label>
+        <p class="small muted" id="reset-body"></p>
+        <div class="row">
+          <input id="reset-confirm" type="text" class="mono" autocomplete="off" placeholder="RESET">
+          <button id="btn-reset" class="btn btn-danger"></button>
+        </div>
+      </div>
+    </section>
+
+  </main>
+</div>
+
+<script src="js/strings.js"></script>
+<script src="js/common.js"></script>
+<script src="js/admin.js"></script>
+</body>
+</html>

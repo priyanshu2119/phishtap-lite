@@ -193,6 +193,52 @@ if [ -x "$REPO_ROOT/tools/host_gate.sh" ] && [ -d "$REPO_ROOT/sketch/phishtap" ]
   echo "    host unit tests PASS"
 fi
 
+# The frontend gate, when there is a frontend to check. It verifies the pages
+# parse, make no external requests, contain no HTML-injection sinks, reference
+# only files that exist, and do not expose the corpus. Every one of those is a
+# failure that is invisible until someone loads the page, and three of them are
+# invisible even then.
+if [ -d "$REPO_ROOT/assets" ] && command -v python3 >/dev/null 2>&1; then
+  echo "deploy_to_board: running the frontend gate"
+  if ! python3 "$REPO_ROOT/tools/web_gate.py" >/tmp/pt_web.$$.log 2>&1; then
+    echo "deploy_to_board: REFUSING TO DEPLOY - frontend gate failed:" >&2
+    tail -40 /tmp/pt_web.$$.log >&2
+    rm -f /tmp/pt_web.$$.log
+    exit 1
+  fi
+  rm -f /tmp/pt_web.$$.log
+  echo "    frontend gate PASS"
+fi
+
+# The Python suite. This was missing for several commits, which meant the backend
+# could be pushed to the board without a single one of its tests running — the
+# gates covered the firmware and the pages but not the layer between them, which
+# is where most of the logic actually lives.
+#
+# Skipped with a warning rather than a failure when pytest is not installed, so
+# the script still works on a machine set up only for firmware work. That is a
+# real trade: it means a deploy can happen without the tests. The warning is loud
+# because a silently skipped suite is how a regression reaches a demo.
+if [ -d "$REPO_ROOT/tests" ] && [ -d "$REPO_ROOT/python" ]; then
+  if python3 -c "import pytest" >/dev/null 2>&1; then
+    echo "deploy_to_board: running the Python test suite"
+    if ! (cd "$REPO_ROOT/python" && python3 -m pytest "$REPO_ROOT/tests" -q) \
+         >/tmp/pt_pytest.$$.log 2>&1; then
+      echo "deploy_to_board: REFUSING TO DEPLOY - Python tests failed:" >&2
+      tail -40 /tmp/pt_pytest.$$.log >&2
+      rm -f /tmp/pt_pytest.$$.log
+      exit 1
+    fi
+    tail -1 /tmp/pt_pytest.$$.log | sed 's/^/    /'
+    rm -f /tmp/pt_pytest.$$.log
+    echo "    python tests PASS"
+  else
+    echo "deploy_to_board: WARNING - pytest is not installed, so the Python suite" >&2
+    echo "  was NOT run before this deploy. Install it with:" >&2
+    echo "      python3 -m pip install -r requirements-dev.txt" >&2
+  fi
+fi
+
 # ── Optional library pre-flight ───────────────────────────────────────────
 # arduino-cli compiles every .cpp in a library's src/, so one broken translation
 # unit in a dependency fails the build even when the sketch never calls it. That
