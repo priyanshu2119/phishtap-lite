@@ -109,6 +109,18 @@ typedef struct {
   uint32_t lastDisplayMs;
   uint32_t lastRecoverMs;
   uint32_t lastStatusLogMs;
+
+  /* Total RPC calls served since boot, incremented by ptBridgeNoteCall.
+   *
+   * It lives here rather than in pt_bridge.h because the [status] line prints it,
+   * and pt_app.h is included BEFORE pt_bridge.h, so the bridge cannot expose a
+   * getter that this file could call. The bridge writes, the app displays.
+   *
+   * It exists because routine polls are no longer printed individually. Without a
+   * cumulative count there would be no way to tell "Python is polling normally"
+   * from "Python stopped polling five minutes ago", and the second one is exactly
+   * the failure the link supervision is supposed to catch. */
+  uint32_t rpcCalls;
 } PtAppState;
 
 static PtAppState   ptApp;
@@ -439,6 +451,8 @@ inline void ptAppLogStatus(uint32_t now) {
   Serial.print((unsigned)PT_EVENT_RING_SIZE);
   Serial.print(" ovf=");
   Serial.print((unsigned long)ptRing.overflows);
+  Serial.print(" rpc=");
+  Serial.print((unsigned long)ptApp.rpcCalls);
   Serial.print(" up=");
   Serial.print((unsigned long)(now / 1000));
   Serial.println("s");

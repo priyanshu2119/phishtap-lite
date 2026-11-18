@@ -67,19 +67,54 @@ static char s_respEvents[PT_JSON_EVENTS];
  * The sequence counter is what makes this work: loop() prints only when the
  * counter has advanced, so a call is logged exactly once no matter how many
  * iterations pass before loop() notices it.
+ *
+ * WHY SOME CALLS ARE QUIET
+ * Python polls pt.get_events about ten times a second and pt.get_status once a
+ * second. On the first real hardware run that produced roughly 46 log lines every
+ * five seconds, and the lines that actually mattered — a card tap, a state
+ * change, a rejection — were buried in them. A log you cannot read is worse than
+ * no log, because it looks like coverage.
+ *
+ * So a routine SUCCESSFUL poll is counted but not printed. Everything else is
+ * printed: every rejection, every game action, and every poll that actually
+ * delivered events. The cumulative count is reported on the periodic [status]
+ * line, so "is Python still polling?" remains answerable at a glance without
+ * one line per call.
  */
 #define PT_RPC_LOG_SLOTS 4
 
 static struct {
   uint32_t seq;
   uint32_t seenSeq;
+  uint32_t total;      /* every call, quiet or not */
+  uint32_t printed;    /* calls actually emitted */
+  bool     quiet;
   char     method[20];
   bool     ok;
   char     detail[40];
 } s_rpcLog;
 
-inline void ptBridgeNoteCall(const char* method, bool ok, const char* detail) {
+inline void ptBridgeNoteCall(const char* method, bool ok, const char* detail,
+                             bool quiet = false) {
+  s_rpcLog.total++;
+  /* Also mirrored into the app state so the periodic [status] line can show it.
+   * See the comment on PtAppState::rpcCalls for why the counter lives there. */
+  ptApp.rpcCalls++;
+
+  /* Do not let a routine poll overwrite a meaningful call that loop() has not
+   * printed yet. Without this, suppressing the noise could also suppress the
+   * signal: a pt.set_state arriving just before a burst of pt.get_events would
+   * be counted and then discarded unseen, which is worse than the flooding this
+   * change exists to fix. The call is still counted, so the [status] line's rpc
+   * total stays accurate.
+   *
+   * A meaningful new call always overwrites, quiet or not, because the newest
+   * game action is the one worth seeing. */
+  bool pending = (s_rpcLog.seq != s_rpcLog.seenSeq);
+  if (quiet && pending && !s_rpcLog.quiet) return;
+
   s_rpcLog.seq++;
+  s_rpcLog.quiet = quiet;
   strncpy(s_rpcLog.method, (method != NULL) ? method : "?", sizeof(s_rpcLog.method) - 1);
   s_rpcLog.method[sizeof(s_rpcLog.method) - 1] = '\0';
   s_rpcLog.ok = ok;
@@ -91,10 +126,22 @@ inline void ptBridgeNoteCall(const char* method, bool ok, const char* detail) {
   }
 }
 
+/* Total RPC calls served since boot. Mirrored into ptApp.rpcCalls, which is what
+ * the periodic [status] line actually prints; this accessor exists for callers
+ * that already have the bridge header in scope. */
+inline uint32_t ptBridgeTotalCalls(void) {
+  return s_rpcLog.total;
+}
+
 /* Called from loop(). Safe to print here. */
 inline void ptBridgePollLogs(void) {
   if (s_rpcLog.seq == s_rpcLog.seenSeq) return;
   s_rpcLog.seenSeq = s_rpcLog.seq;
+
+  /* A quiet entry is counted but not printed. seenSeq has already advanced, so
+   * it will not be reconsidered on the next iteration. */
+  if (s_rpcLog.quiet) return;
+  s_rpcLog.printed++;
 
   Serial.print("[rpc] ");
   Serial.print(s_rpcLog.method);
@@ -154,7 +201,11 @@ inline String ptRpcGetStatus(String req) {
     ptBridgeNoteCall("pt.get_status", false, "response did not fit");
     return ptRpcErr("E_INTERNAL");
   }
-  ptBridgeNoteCall("pt.get_status", true, NULL);
+  /* Quiet on success. Python calls this once a second purely as a health read,
+   * and the periodic [status] line already reports everything it returns, so
+   * printing each one is pure noise. A FAILURE is still printed, because that is
+   * the interesting case. */
+  ptBridgeNoteCall("pt.get_status", true, NULL, /*quiet=*/true);
   return String(s_respSmall);
 }
 
@@ -170,8 +221,10 @@ inline String ptRpcGetEvents(String req) {
   (void)ptJsonGetULong(req.c_str(), "since", &since);
 
   bool missed = false;
+  uint32_t emitted = 0;
   size_t n = ptEventsWriteJson(&ptRing, (uint32_t)since,
-                               s_respEvents, sizeof(s_respEvents), &missed);
+                               s_respEvents, sizeof(s_respEvents), &missed,
+                               &emitted);
   if (n == 0) {
     /* The ring did not fit. Report it rather than sending a truncated document
      * that Python cannot parse, and drop the oldest events so the next poll has
@@ -179,7 +232,18 @@ inline String ptRpcGetEvents(String req) {
     ptBridgeNoteCall("pt.get_events", false, "payload did not fit");
     return ptRpcErr("E_INTERNAL");
   }
-  ptBridgeNoteCall("pt.get_events", true, missed ? "cursor had gaps" : NULL);
+
+  /* Quiet only when the poll was genuinely uneventful. Delivering events, or
+   * discovering that Python's cursor fell behind the ring, are both worth a line
+   * — those are the moments the game actually moves or loses data. */
+  if (emitted == 0 && !missed) {
+    ptBridgeNoteCall("pt.get_events", true, NULL, /*quiet=*/true);
+  } else {
+    char detail[40];
+    snprintf(detail, sizeof(detail), "%lu event(s)%s",
+             (unsigned long)emitted, missed ? ", cursor had gaps" : "");
+    ptBridgeNoteCall("pt.get_events", true, detail);
+  }
   return String(s_respEvents);
 }
 
@@ -193,7 +257,10 @@ inline String ptRpcAckEvents(String req) {
     return ptRpcErr("E_INTERNAL");
   }
   ptRingAck(&ptRing, (uint32_t)seq);
-  ptBridgeNoteCall("pt.ack_events", true, NULL);
+  /* Quiet on success: acks are pure bookkeeping and follow every poll that
+   * returned anything, so printing them doubles the noise for no information.
+   * The ring depth on the [status] line shows whether acking is keeping up. */
+  ptBridgeNoteCall("pt.ack_events", true, NULL, /*quiet=*/true);
   return ptRpcOk();
 }
 

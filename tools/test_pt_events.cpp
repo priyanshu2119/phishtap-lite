@@ -403,11 +403,68 @@ static void test_envelope_is_readable(void) {
   CHECK(brackets == 0, "every array is closed");
 }
 
+/* ── Emitted-event count ──────────────────────────────────────────────────
+ * The count output exists so the firmware can tell an uneventful poll from one
+ * that delivered something, and only log the latter. Python polls about ten
+ * times a second, so getting this number wrong means either a silent console or
+ * a flooded one. It must agree with what is actually in the payload. */
+
+static void test_emitted_count(void) {
+  SECTION("events: the emitted count matches the payload");
+  PtEventRing r;
+  ptRingInit(&r);
+  char buf[PT_JSON_EVENTS];
+  bool missed = false;
+  uint32_t count = 999;
+
+  /* Empty ring: zero emitted, and the optional pointer must be filled in rather
+   * than left at its caller-supplied value. */
+  CHECK(ptEventsWriteJson(&r, 0, buf, sizeof(buf), &missed, &count) > 0,
+        "empty ring serialises");
+  CHECK(count == 0, "empty ring emits zero events");
+
+  for (uint32_t i = 1; i <= 5; ++i) ptRingPushHeartbeat(&r, i * 100);
+
+  count = 999;
+  CHECK(ptEventsWriteJson(&r, 0, buf, sizeof(buf), &missed, &count) > 0,
+        "five events serialise");
+  CHECK(count == 5, "since=0 emits all five");
+
+  count = 999;
+  CHECK(ptEventsWriteJson(&r, 3, buf, sizeof(buf), &missed, &count) > 0,
+        "cursor at 3 serialises");
+  CHECK(count == 2, "since=3 emits only seq 4 and 5");
+
+  count = 999;
+  CHECK(ptEventsWriteJson(&r, 5, buf, sizeof(buf), &missed, &count) > 0,
+        "cursor at newest serialises");
+  CHECK(count == 0, "since=newest emits nothing");
+
+  /* After eviction the count must reflect what is actually retained, not what
+   * was ever pushed. */
+  for (uint32_t i = 0; i < 20; ++i) ptRingPushHeartbeat(&r, 1000 + i);
+  count = 999;
+  CHECK(ptEventsWriteJson(&r, 0, buf, sizeof(buf), &missed, &count) > 0,
+        "evicted ring serialises");
+  CHECK(count == PT_EVENT_RING_SIZE, "since=0 emits exactly the retained window");
+
+  /* A stale cursor resyncs from the oldest retained event. */
+  count = 999;
+  missed = false;
+  CHECK(ptEventsWriteJson(&r, 2, buf, sizeof(buf), &missed, &count) > 0,
+        "stale cursor serialises");
+  CHECK(missed, "stale cursor reports a gap");
+  CHECK(count == PT_EVENT_RING_SIZE, "resync emits the whole retained window");
+
+  /* The count pointer is optional; passing NULL must not crash. */
+  CHECK(ptEventsWriteJson(&r, 0, buf, sizeof(buf), &missed, NULL) > 0,
+        "a NULL count pointer is accepted");
+}
+
 /* --dump: print a representative payload for validation by Python's json
  * module. This is the strongest check available, because that parser shares no
  * code with the writer and implements the real RFC 8259 grammar. */
-static int dump_payload(void) {
-  PtEventRing r;
+static int dump_payload(void) {  PtEventRing r;
   ptRingInit(&r);
 
   ptRingPushHeartbeat(&r, 1000);
@@ -448,6 +505,7 @@ int main(int argc, char** argv) {
   test_uid_truncation();
   test_buffer_too_small();
   test_envelope_is_readable();
+  test_emitted_count();
 
   printf("\n==========================\n");
   printf("passed: %d   failed: %d\n", g_pass, g_fail);

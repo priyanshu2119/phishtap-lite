@@ -283,16 +283,23 @@ inline uint32_t ptRingPushHeartbeat(PtEventRing* r, uint32_t t_ms) {
  * this flag answers "did YOU miss something on THIS poll", which is what Python
  * needs in order to decide to resync and log.
  *
+ * `countOut`, if non-NULL, receives the number of events actually emitted. The
+ * caller needs this to decide whether a poll is worth logging: Python polls
+ * roughly ten times a second and almost every poll returns nothing, so printing
+ * each one buries the lines that matter.
+ *
  * Returns the JSON length, or 0 if it did not fit. A 0 return must be treated as
  * an error by the caller and answered with an explicit failure, never sent as an
  * empty or truncated document.
  */
 inline size_t ptEventsWriteJson(const PtEventRing* r, uint32_t since,
-                                char* buf, size_t cap, bool* overflowOut) {
+                                char* buf, size_t cap, bool* overflowOut,
+                                uint32_t* countOut = NULL) {
   PtJsonWriter w;
   ptJsonInit(&w, buf, cap);
 
   bool missed = false;
+  uint32_t emitted = 0;
   uint32_t start = since + 1;
   if (!ptRingEmpty(r) && start < r->oldestSeq) {
     /* The caller asked for events older than the ring still holds. */
@@ -314,6 +321,7 @@ inline size_t ptEventsWriteJson(const PtEventRing* r, uint32_t since,
        * confuse Python's cursor far more than a missing event would. */
       if (e->seq != seq) continue;
 
+      emitted++;
       ptJsonObjBegin(&w);
       ptJsonKVUint(&w, "seq", (unsigned long)seq);
       ptJsonKVUint(&w, "t_ms", (unsigned long)e->t_ms);
@@ -359,6 +367,7 @@ inline size_t ptEventsWriteJson(const PtEventRing* r, uint32_t since,
 
   size_t n = ptJsonFinish(&w);
   if (overflowOut != NULL) *overflowOut = missed;
+  if (countOut != NULL) *countOut = emitted;
   return n;
 }
 
