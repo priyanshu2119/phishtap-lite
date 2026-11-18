@@ -74,6 +74,65 @@ def _client_ip(request: Request) -> str:
     return host or "unknown"
 
 
+async def _read_inputs(request: Request) -> dict[str, Any]:
+    """Merge the JSON body and the query parameters, body winning on conflict.
+
+    WHY THIS FUNCTION EXISTS, AND THE BUG IT REPLACED
+    Every POST handler used to be declared like this:
+
+        def post_connect(request: Request, token: str = "") -> JSONResponse:
+
+    That looks like it reads a JSON body. It does not. In FastAPI a SCALAR
+    parameter with a default is interpreted as a QUERY parameter; only a Pydantic
+    model (or an explicit Body(...)) is read from the body. So a phone posting
+    {"token": "abc"} was silently ignored, `token` took its default "", and the
+    API answered "token is required" for a request that had just supplied one.
+
+    Every POST endpoint was broken this way, and 351 passing tests did not catch
+    it, because they all called ApiService methods directly and never went
+    through HTTP. The bug only appeared when a real browser scanned a real QR
+    code. tests/test_web_adapter.py now issues real requests so it cannot recur.
+
+    Accepting the body OR the query string is deliberate rather than merely
+    forgiving: the browser sends a body, and a query string keeps `curl -X POST
+    .../?token=x` working for whoever is debugging at midnight. The body wins, so
+    a client cannot be overridden by a stray query parameter.
+
+    A missing or non-JSON body is not an error. It yields an empty dict, and the
+    API layer then returns its own precise E_* code, which is a far more useful
+    answer than a 422 from the framework.
+    """
+    out: dict[str, Any] = dict(request.query_params)
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001 - no body, empty body, or not JSON
+        return out
+    if isinstance(body, dict):
+        out.update(body)
+    return out
+
+
+def _str(inputs: dict[str, Any], key: str) -> str:
+    """Read a string field, tolerating a JSON null or a non-string.
+
+    A client sending {"token": null} must produce the same "token is required"
+    error as omitting it, not a TypeError from deep inside the API layer.
+    """
+    value = inputs.get(key)
+    if value is None:
+        return ""
+    return value if isinstance(value, str) else str(value)
+
+
+def _int(inputs: dict[str, Any], key: str, default: int) -> int:
+    """Read an integer field, falling back to ``default`` on anything unusable."""
+    value = inputs.get(key, default)
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def create_web_ui(
     *,
     port: int = 7000,
@@ -127,27 +186,39 @@ def _register_rest(ui: Any, api: ApiService) -> None:
     def get_review(token: str = "") -> JSONResponse:
         return as_json(api.review(token))
 
-    def post_connect(request: Request, token: str = "") -> JSONResponse:
-        return as_json(api.connect(token, _client_ip(request)))
+    async def post_connect(request: Request) -> JSONResponse:
+        inputs = await _read_inputs(request)
+        return as_json(api.connect(_str(inputs, "token"), _client_ip(request)))
 
-    def post_join(request: Request, pin: str = "") -> JSONResponse:
-        return as_json(api.join(pin, _client_ip(request)))
+    async def post_join(request: Request) -> JSONResponse:
+        inputs = await _read_inputs(request)
+        return as_json(api.join(_str(inputs, "pin"), _client_ip(request)))
 
-    def post_consent(
-        request: Request, token: str = "", nickname: str = "", consent_version: int = 1
-    ) -> JSONResponse:
-        return as_json(api.consent(token, nickname, consent_version, _client_ip(request)))
+    async def post_consent(request: Request) -> JSONResponse:
+        inputs = await _read_inputs(request)
+        return as_json(api.consent(
+            _str(inputs, "token"),
+            _str(inputs, "nickname"),
+            _int(inputs, "consent_version", 1),
+            _client_ip(request),
+        ))
 
-    def post_render_ack(token: str = "") -> JSONResponse:
-        return as_json(api.render_ack(token))
+    async def post_render_ack(request: Request) -> JSONResponse:
+        inputs = await _read_inputs(request)
+        return as_json(api.render_ack(_str(inputs, "token")))
 
-    def post_answer(
-        request: Request, token: str = "", answer: str = "", source: str = "phone"
-    ) -> JSONResponse:
-        return as_json(api.answer(token, answer, source, _client_ip(request)))
+    async def post_answer(request: Request) -> JSONResponse:
+        inputs = await _read_inputs(request)
+        return as_json(api.answer(
+            _str(inputs, "token"),
+            _str(inputs, "answer"),
+            _str(inputs, "source") or "phone",
+            _client_ip(request),
+        ))
 
-    def post_delete_request(token: str = "") -> JSONResponse:
-        return as_json(api.delete_request(token))
+    async def post_delete_request(request: Request) -> JSONResponse:
+        inputs = await _read_inputs(request)
+        return as_json(api.delete_request(_str(inputs, "token")))
 
     # -- admin ------------------------------------------------------------
     #
@@ -155,8 +226,9 @@ def _register_rest(ui: Any, api: ApiService) -> None:
     # URL end up in access logs, browser history and Referer headers, which is a
     # needless way to leak a token that grants database deletion.
 
-    def admin_login(request: Request, pin: str = "") -> JSONResponse:
-        return as_json(api.admin_login(pin, _client_ip(request)))
+    async def admin_login(request: Request) -> JSONResponse:
+        inputs = await _read_inputs(request)
+        return as_json(api.admin_login(_str(inputs, "pin"), _client_ip(request)))
 
     def admin_export(
         x_admin_token: str | None = Header(default=None, alias="X-Admin-Token"),
@@ -171,23 +243,26 @@ def _register_rest(ui: Any, api: ApiService) -> None:
             headers={"Content-Disposition": 'attachment; filename="phishtap-export.csv"'},
         )
 
-    def admin_delete_player(
-        player_id: str = "",
+    async def admin_delete_player(
+        request: Request,
         x_admin_token: str | None = Header(default=None, alias="X-Admin-Token"),
     ) -> JSONResponse:
-        return as_json(api.admin_delete_player(x_admin_token, player_id))
+        inputs = await _read_inputs(request)
+        return as_json(api.admin_delete_player(x_admin_token, _str(inputs, "player_id")))
 
-    def admin_db_reset(
-        confirm: str = "",
+    async def admin_db_reset(
+        request: Request,
         x_admin_token: str | None = Header(default=None, alias="X-Admin-Token"),
     ) -> JSONResponse:
-        return as_json(api.admin_db_reset(x_admin_token, confirm))
+        inputs = await _read_inputs(request)
+        return as_json(api.admin_db_reset(x_admin_token, _str(inputs, "confirm")))
 
-    def admin_clock(
-        offset_ms: int = 0,
+    async def admin_clock(
+        request: Request,
         x_admin_token: str | None = Header(default=None, alias="X-Admin-Token"),
     ) -> JSONResponse:
-        return as_json(api.admin_clock(x_admin_token, offset_ms))
+        inputs = await _read_inputs(request)
+        return as_json(api.admin_clock(x_admin_token, _int(inputs, "offset_ms", 0)))
 
     def admin_analytics(
         x_admin_token: str | None = Header(default=None, alias="X-Admin-Token"),

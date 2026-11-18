@@ -312,9 +312,16 @@
 
 <!-- SESSION GONE -->
 <section id="screen-gone" class="screen center is-hidden">
-  <div style="margin-top:30vh">
+  <div style="margin-top:22vh">
     <h1 id="gone-title"></h1>
     <p class="muted" id="gone-text"></p>
+    <!-- A dead end here is worse than the original failure. If the token expired
+         or the scan mangled the URL, the player is standing at a console with a
+         queue behind them and no way forward. The PIN page is the supported
+         second route in, so it is always offered. -->
+    <a id="btn-gone-join" class="btn btn-accent btn-block btn-lg" href="join.html"
+       style="margin-top:24px"></a>
+    <p class="tiny faint" id="gone-hint" style="margin-top:14px"></p>
   </div>
 </section>
 

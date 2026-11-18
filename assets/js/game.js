@@ -50,7 +50,7 @@
       "btn-safe", "btn-safe-label", "btn-safe-hint",
       "verdict", "verdict-word", "verdict-sub", "verdict-pts",
       "screen-over", "over-eyebrow", "over-score", "over-rounds", "btn-review", "over-again",
-      "screen-gone", "gone-title", "gone-text",
+      "screen-gone", "gone-title", "gone-text", "btn-gone-join", "gone-hint",
     ];
     for (var i = 0; i < ids.length; i++) { el[ids[i]] = PT.$(ids[i]); }
   }
@@ -85,6 +85,8 @@
 
     PT.setText(el["gone-title"], PT.t("brand.name"));
     PT.setText(el["gone-text"], PT.t("game.sessionGone"));
+    PT.setText(el["btn-gone-join"], PT.t("game.tryPinInstead"));
+    PT.setText(el["gone-hint"], PT.t("game.goneHint"));
   }
 
   /* ── Screen switching ─────────────────────────────────────────────────── */
@@ -494,7 +496,8 @@
     token = PT.qs("token");
     if (!token) {
       /* No token means the page was opened directly rather than from a QR code.
-       * Point at the PIN page, which is the supported way in without a scan. */
+       * The PIN page is the supported way in without a scan, so send them there
+       * rather than showing a dead end. */
       PT.setText(el["gone-text"], PT.t("join.noSession"));
       showScreen("gone");
       return;

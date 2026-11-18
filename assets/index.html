@@ -268,6 +268,13 @@
           <div class="pin-digits" id="pin-digits">----</div>
           <div class="pin-expiry" id="pin-expiry"></div>
           <p class="muted" id="join-hint" style="margin-top:20px; max-width:340px;"></p>
+          <!-- The QR encodes game.html?token=..., so if scanning fails there is
+               otherwise no route to the PIN page short of guessing the URL.
+               Showing it makes the fallback actually reachable, which is the
+               whole reason join.html exists. -->
+          <p class="tiny" id="join-fallback-label" style="margin-top:18px; color:var(--fg-faint);"></p>
+          <p class="mono" id="join-url"
+             style="margin-top:4px; font-size:17px; color:var(--accent); word-break:break-all;"></p>
         </div>
       </div>
     </section>

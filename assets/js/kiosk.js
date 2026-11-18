@@ -51,6 +51,7 @@
       "view-attract", "attract-title", "attract-tag", "attract-cta",
       "board-wrap", "board-title", "board-list",
       "view-join", "qr", "qr-url", "pin-label", "pin-digits", "pin-expiry", "join-hint",
+      "join-fallback-label", "join-url",
       "view-play", "k-round", "v-round", "k-lives", "v-lives", "k-score", "v-score",
       "m-sender", "m-channel", "m-subject", "m-body", "play-who",
       "view-over", "over-eyebrow", "over-score", "over-who", "over-why",
@@ -68,6 +69,7 @@
     PT.setText(el["over-board-title"], PT.t("kiosk.leaderboardTitle"));
     PT.setText(el["pin-label"], PT.t("kiosk.pinLabel"));
     PT.setText(el["join-hint"], PT.t("kiosk.scanToJoin"));
+    PT.setText(el["join-fallback-label"], PT.t("kiosk.cantScan"));
     PT.setText(el["k-round"], PT.t("kiosk.roundLabel"));
     PT.setText(el["k-lives"], PT.t("kiosk.livesLabel"));
     PT.setText(el["k-score"], PT.t("kiosk.scoreLabel"));
@@ -160,6 +162,16 @@
       }
     }
     PT.setText(el["qr-url"], url);
+
+    /* The PIN page address, built from the same base the QR used. Derived from
+     * the session URL rather than window.location so it stays correct if the page
+     * is being viewed through a proxy or a different host than the board reports. */
+    if (url) {
+      var joinUrl = url.split("/game.html")[0] + "/join.html";
+      PT.setText(el["join-url"], joinUrl);
+      PT.show(el["join-url"], true);
+      PT.show(el["join-fallback-label"], true);
+    }
 
     startExpiry(s.expires_in_s);
   }

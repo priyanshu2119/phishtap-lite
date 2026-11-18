@@ -49,6 +49,10 @@ window.PT_STRINGS = {
     orEnterPin: "or enter the PIN on your phone",
     pinLabel: "PIN",
     sessionExpires: "This code expires in {seconds}s",
+    /* The PIN page is only useful if a phone can reach it. The QR encodes the
+     * game URL, so when scanning fails there is otherwise no route to join.html
+     * short of guessing it. Showing the address makes the fallback real. */
+    cantScan: "Can't scan? Open this on your phone:",
 
     playerJoined: "{nickname} joined",
     roundLabel: "Round",
@@ -141,6 +145,8 @@ window.PT_STRINGS = {
     reconnecting: "Connection lost. Reconnecting…",
     reconnected: "Reconnected.",
     sessionGone: "This session has ended. Tap the card on the console to start a new one.",
+    tryPinInstead: "Enter the PIN instead",
+    goneHint: "The PIN is shown on the console screen.",
   },
 
   /* ── Review (the phone, after the game) ───────────────────────────────── */
