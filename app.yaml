@@ -25,12 +25,23 @@ icon: 🎣
 
 # A list of network ports that the application exposes.
 #
-# 7000 is the WebUI brick's default bind port. Declaring it here is what makes
-# App Lab publish it, so a laptop browser (the kiosk) and a phone on the same
-# network can reach http://<board-ip>:7000. Without this the server binds inside
-# the container and nothing outside can connect.
-ports:
-  - 7000
+# LEFT EMPTY ON PURPOSE, AND THIS IS NOT AN OMISSION.
+#
+# The web_ui brick already declares port 7000 in the board's brick registry
+# (/var/lib/arduino-app-cli/assets/<version>/bricks-list.yaml):
+#
+#     - id: arduino:web_ui
+#       ports:
+#       - 7000
+#
+# Declaring 7000 here as well makes App Lab refuse to start the app with:
+#
+#     port 7000 is declared by multiple sources: arduino:web_ui, app.yaml
+#
+# So the brick owns the port and app.yaml must not repeat it. Only add an entry
+# here for a port that NO brick provides — for example if a future stage ran its
+# own second server alongside the brick.
+ports: []
 
 # A list of bricks used by this application.
 #

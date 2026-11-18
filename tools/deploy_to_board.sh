@@ -247,10 +247,15 @@ fi
 # so "Create new app" rejects the name as already in use and there is no obvious
 # way out from the UI.
 #
-# So create the four files App Lab expects. Each is written ONLY IF ABSENT, which
-# matters for app.yaml above all: Stage 2 adds `bricks: [web_ui]` and
-# `ports: [7000]` to it, and clobbering that on every deploy would silently
-# remove the web server from the running app.
+# So create the files App Lab expects. README.md, .gitignore and the placeholder
+# python/main.py are written ONLY IF ABSENT, so a board-side edit is not silently
+# reverted.
+#
+# app.yaml is the exception: when the repository has one it is AUTHORITATIVE and
+# always pushed, because it declares the bricks and is configuration that belongs
+# in version control. Letting a stale copy survive on the board would mean the
+# running app does not match the repository. The generated template below is only
+# a fallback for sketches that have no manifest in the repo, such as hw_selftest.
 #
 # Structure transcribed from a working app on this board:
 #   ArduinoApps/<app>/app.yaml      name, description, icon, ports, bricks
@@ -275,12 +280,15 @@ description: "PhishTap Lite console firmware"
 icon: 🎣
 
 # A list of network ports that the application exposes.
-# Example: [80, 443]
-# Stage 2 will need [7000] here for the web_ui brick.
+#
+# Do NOT list a port that a brick already provides. arduino:web_ui declares 7000
+# itself in the board's brick registry, and repeating it here makes App Lab refuse
+# to start with:
+#   port 7000 is declared by multiple sources: arduino:web_ui, app.yaml
+# List only ports that no brick publishes.
 ports: []
 
-# A list of bricks used by this application.
-# Stage 2 will need [web_ui] here.
+# A list of bricks used by this application, e.g. ["arduino:web_ui"].
 bricks: []
 YAML
 
