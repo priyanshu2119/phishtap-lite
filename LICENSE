@@ -1,0 +1,134 @@
+MIT License
+
+Copyright (c) 2026 Priyanshu Pratik
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+---
+
+## Third-Party Licenses
+
+This project includes the following third-party components:
+
+### Hardware Libraries
+
+**MFRC522 Library** (Arduino)
+- License: Public Domain / Unlicense
+- Source: https://github.com/miguelbalboa/rfid
+- Used for: RFID card reading
+
+**Arduino_LED_Matrix**
+- License: LGPL-2.1
+- Source: https://github.com/arduino-libraries/Arduino_LED_Matrix
+- Used for: 8x13 LED matrix control
+
+**Arduino_RouterBridge**
+- License: LGPL-2.1
+- Source: https://github.com/arduino-libraries/Arduino_RouterBridge
+- Used for: MCU-MPU communication
+
+### Python Libraries
+
+**FastAPI**
+- License: MIT
+- Source: https://github.com/tiangolo/fastapi
+- Used for: Web API framework
+
+**Uvicorn**
+- License: BSD-3-Clause
+- Source: https://github.com/encode/uvicorn
+- Used for: ASGI server
+
+**python-socketio**
+- License: MIT
+- Source: https://github.com/miguelgrinberg/python-socketio
+- Used for: WebSocket communication
+
+**Pydantic**
+- License: MIT
+- Source: https://github.com/pydantic/pydantic
+- Used for: Data validation
+
+### Frontend Libraries
+
+**Socket.IO Client**
+- License: MIT
+- Source: https://github.com/socketio/socket.io-client
+- Used for: Real-time communication
+
+**QRCode.js**
+- License: MIT
+- Source: https://github.com/davidshimjs/qrcodejs
+- Used for: QR code generation
+
+### Fonts and Assets
+
+**System Fonts**
+- No additional licenses required
+- Uses system-installed fonts
+
+---
+
+## Educational Use
+
+This project is designed for educational purposes, specifically for teaching
+phishing awareness and cybersecurity concepts in college environments.
+
+The phishing message corpus (`python/corpus.json`) contains fictional examples
+created for educational purposes only. All domains use reserved TLDs (.example,
+.invalid) and do not represent real organizations.
+
+---
+
+## Citation
+
+If you use this project in academic research or publications, please cite:
+
+```bibtex
+@software{phishtap_lite_2026,
+  author = {Pratik, Priyanshu},
+  title = {PhishTap Lite: An Arcade Game for Phishing Awareness},
+  year = {2026},
+  publisher = {GitHub},
+  url = {https://github.com/priyanshu2119/phishtap-lite}
+}
+```
+
+---
+
+## Contact
+
+For questions, contributions, or commercial licensing:
+- Email: priyanshupratik2119@gmail.com
+- GitHub: https://github.com/priyanshu2119/phishtap-lite
+
+---
+
+## Acknowledgments
+
+This project was inspired by:
+- Real phishing campaigns targeting Indian students
+- Arcade game design principles
+- Security awareness training best practices
+- The Arduino community and open-source contributors
+
+Special thanks to:
+- Arduino for the UNO Q platform
+- The open-source community for the libraries used
+- Students who tested early versions and provided feedback
