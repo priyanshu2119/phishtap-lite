@@ -1,0 +1,36 @@
+# PhishTap Lite — LAPTOP DEVELOPMENT dependencies.
+#
+# ⚠️  THIS FILE IS NOT DEPLOYED TO THE BOARD, AND THAT IS DELIBERATE.
+#
+# An earlier revision put these in python/requirements.txt, which App Lab's
+# container entrypoint installs at every start. That failed:
+#
+#     error: No solution found when resolving dependencies
+#       cause: Because only fastapi-socketio<=0.0.10 is available and you
+#              require fastapi-socketio>=1.0.2, we can conclude that your
+#              requirements are unsatisfiable.
+#
+# The version pin had been guessed rather than checked; the image ships
+# fastapi-socketio 0.0.10. The app still started, because the brick's own
+# dependencies were already present, but the failed resolution cleared the uv
+# cache and set DEPS_FAILED, which makes the `prepare` phase fail.
+#
+# WHY THE BOARD NEEDS NO requirements.txt AT ALL
+# Every third-party import in python/ is either `arduino` or `fastapi`, and both
+# are already in the container image — `arduino` from app-bricks-py and `fastapi`
+# from the web_ui brick. Verified by AST-scanning the package. Anything else is
+# standard library.
+#
+# Also note the entrypoint counts COMMENT lines as non-blank:
+#     REQUIREMENTS_LINES="$(grep -c '[^[:space:]]' "$REQUIREMENTS_FILE")"
+# so even a comment-only python/requirements.txt triggers `uv pip install` and
+# needs network access at startup. Keeping the file out of python/ entirely is
+# the only way to be sure it is never installed on the board.
+#
+# Install for laptop development with:
+#     python -m pip install -r requirements-dev.txt
+# Then run the suite:
+#     cd python && python -m pytest ../tests -q
+
+pytest>=8.0
+PyYAML>=6.0

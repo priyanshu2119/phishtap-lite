@@ -407,11 +407,28 @@ if [ -d "$REPO_ROOT/python/phishtap" ]; then
     echo "    DRY RUN: would push python/phishtap/"
   fi
 fi
-for extra in corpus.json requirements.txt; do
-  if [ -f "$REPO_ROOT/python/$extra" ]; then
-    run "$ADB" push "$REPO_ROOT/python/$extra" "$APP_ROOT/python/$extra"
+if [ -f "$REPO_ROOT/python/corpus.json" ]; then
+  run "$ADB" push "$REPO_ROOT/python/corpus.json" "$APP_ROOT/python/corpus.json"
+fi
+
+# python/requirements.txt is deliberately NOT pushed, and a stale one is removed.
+#
+# The container entrypoint installs it at every start, and it counts comment lines
+# as non-blank, so even an all-comment file triggers `uv pip install` and needs
+# network access. This backend imports only `arduino` and `fastapi`, both of which
+# the image already provides, so there is nothing to install. A guessed version
+# pin here previously made dependency resolution fail outright:
+#   error: No solution found when resolving dependencies
+# which cleared the uv cache and failed the prepare phase.
+#
+# Laptop-only dependencies live in requirements-dev.txt at the repository root,
+# outside python/, where the entrypoint never looks.
+if [ "$DRY_RUN" -eq 0 ]; then
+  if "$ADB" shell "[ -e '$APP_ROOT/python/requirements.txt' ]" >/dev/null 2>&1; then
+    echo "    scaffold: removing a stale python/requirements.txt from the board"
+    "$ADB" shell "rm -f '$APP_ROOT/python/requirements.txt' '$APP_ROOT/.cache/installed_requirements.txt'"
   fi
-done
+fi
 
 # Static web assets. The WebUI brick serves assets_dir_path (default /app/assets)
 # and requires an index.html if that directory exists, so a partially pushed

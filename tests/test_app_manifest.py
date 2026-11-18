@@ -158,3 +158,85 @@ def test_manifest_is_valid_yaml_with_no_tabs(manifest):
         assert "\t" not in line, f"app.yaml line {lineno} contains a tab"
     # Re-serialising proves the parse was lossless enough to be meaningful.
     assert yaml.safe_load(yaml.safe_dump(manifest)) == manifest
+
+
+# ── Board dependencies ────────────────────────────────────────────────────
+
+def test_the_board_has_no_requirements_file():
+    """python/requirements.txt must not exist.
+
+    App Lab's container entrypoint installs it at every start, and it counts
+    COMMENT lines as non-blank:
+
+        REQUIREMENTS_LINES="$(grep -c '[^[:space:]]' "$REQUIREMENTS_FILE")"
+
+    so even an all-comment file triggers `uv pip install` and needs network access
+    at startup. A guessed pin in that file previously made resolution fail:
+
+        error: No solution found when resolving dependencies
+          cause: Because only fastapi-socketio<=0.0.10 is available and you
+                 require fastapi-socketio>=1.0.2 ...
+
+    The app still started because the brick's own dependencies were already
+    present, but the failure cleared the uv cache and set DEPS_FAILED, which makes
+    the prepare phase fail. Laptop-only dependencies belong in requirements-dev.txt
+    at the repository root, outside python/, where the entrypoint never looks.
+    """
+    board_requirements = REPO_ROOT / "python" / "requirements.txt"
+    assert not board_requirements.exists(), (
+        "python/requirements.txt is installed by the App Lab container at every "
+        "start and needs network access. This backend imports only `arduino` and "
+        "`fastapi`, both already in the image. Put laptop-only dependencies in "
+        "requirements-dev.txt at the repository root instead."
+    )
+
+
+def test_laptop_dependencies_live_outside_the_deployed_tree():
+    """The dev requirements file must exist and must not be under python/."""
+    dev = REPO_ROOT / "requirements-dev.txt"
+    assert dev.exists(), "requirements-dev.txt is missing; laptop tests need pytest"
+    assert dev.parent == REPO_ROOT, (
+        "requirements-dev.txt must sit at the repository root, not under python/, "
+        "or the App Lab entrypoint will try to install it on the board"
+    )
+    text = dev.read_text(encoding="utf-8").lower()
+    assert "pytest" in text, "pytest must be declared for the laptop suite"
+
+
+def test_the_backend_imports_nothing_the_image_lacks():
+    """Every third-party import in python/ must be provided by the container image.
+
+    The image ships `arduino` (app-bricks-py) and `fastapi` (via the web_ui
+    brick). Anything else would need a requirements file, which the test above
+    forbids, so this is the check that keeps those two rules consistent.
+
+    AST-parsed rather than imported, because importing phishtap.adapters would
+    pull in arduino.* and fail on a laptop.
+    """
+    import ast
+    import sys
+
+    allowed = {"arduino", "fastapi"}
+    stdlib = set(sys.stdlib_module_names)
+    package_root = REPO_ROOT / "python" / "phishtap"
+
+    offenders: dict[str, set[str]] = {}
+    for path in sorted(package_root.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            names: list[str] = []
+            if isinstance(node, ast.Import):
+                names = [a.name.split(".")[0] for a in node.names]
+            elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                names = [node.module.split(".")[0]]
+            for name in names:
+                if name in stdlib or name == "phishtap":
+                    continue
+                if name not in allowed:
+                    offenders.setdefault(name, set()).add(path.name)
+
+    assert not offenders, (
+        f"third-party imports not provided by the container image: {offenders}. "
+        "The board has no requirements.txt by design, so either the package is "
+        "already in the image or it cannot be used."
+    )
